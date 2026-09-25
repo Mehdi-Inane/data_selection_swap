@@ -43,6 +43,8 @@ from torch.utils.data import DataLoader, Subset, random_split
 
 from cords.utils.models import ResNet18
 
+import selection_common as common
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reproducibility
@@ -281,6 +283,10 @@ def main():
                    help='Data loader workers')
     p.add_argument('--download',       action='store_true', default=False,
                    help='Download dataset if not present')
+    p.add_argument('--scoring_transform', default='train', choices=['train', 'test'],
+                   help="Transform used when extracting features ('train' = previous behaviour)")
+    p.add_argument('--selection_only', action='store_true', default=False,
+                   help='Stop after saving indices + timing (skip retraining)')
     args = p.parse_args()
 
     set_seed(args.seed)
@@ -320,13 +326,15 @@ def main():
     INDICES_SAVE_PATH = os.path.join(base_dir, f"kl_faithful_{budget}_indices.pt")
     METRICS_SAVE_PATH = os.path.join(base_dir, f"kl_faithful_{budget}_metrics.json")
     OBJ_SAVE_PATH     = os.path.join(base_dir, f"kl_faithful_{budget}_objective.json")
+    TIMING_SAVE_PATH  = os.path.join(base_dir, f"kl_faithful_{budget}_timing.json")
 
     # ── 3. Data loaders ──────────────────────────────────────────────────────
     trainset, _ = random_split(
         cfg['full_train'], [n_train, n_val],
         generator=torch.Generator().manual_seed(args.seed),
     )
-    eval_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=False,
+    eval_loader = DataLoader(common.scoring_subset(cfg, trainset, args.scoring_transform),
+                             batch_size=BATCH_SIZE, shuffle=False,
                              pin_memory=True, num_workers=args.num_workers)
     testloader  = DataLoader(cfg['testset'], batch_size=BATCH_SIZE, shuffle=False,
                              pin_memory=True, num_workers=args.num_workers)
@@ -366,22 +374,31 @@ def main():
     if not ckpt_paths:
         raise ValueError(f"No .pth checkpoints in {args.checkpoint_dir}")
 
+    timer = common.SelectionTimer(device)
     logger.info(f"Found {len(ckpt_paths)} checkpoints — extracting factored features ...")
-    LP_list = load_trajectory_factored_features(
-        ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi,
-    )
+    with timer.phase('scoring'):
+        LP_list = load_trajectory_factored_features(
+            ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi,
+        )
 
     # ── 7. Algorithm 1 ───────────────────────────────────────────────────────
     logger.info(f"Running single-swap descent  (budget={budget}/{n_train}) ...")
-    selected_indices, objective_history, total_iters = gradient_ranked_single_swap(
-        LP_list, budget, max_iters=args.max_iters, log_freq=5, device=device,
-    )
+    with timer.phase('selection'):
+        selected_indices, objective_history, total_iters = gradient_ranked_single_swap(
+            LP_list, budget, max_iters=args.max_iters, log_freq=5, device=device,
+        )
     logger.info(f"Converged in {total_iters} iterations, "
                 f"{len(selected_indices)} samples selected.")
 
+    common.save_timing(TIMING_SAVE_PATH, timer, logger, method='kl_faithful',
+                       reference_epochs_used=common.reference_epochs_used(ckpt_paths),
+                       swap_iterations=total_iters)
     torch.save(selected_indices, INDICES_SAVE_PATH)
     with open(OBJ_SAVE_PATH, 'w') as fh:
         json.dump(objective_history, fh, indent=4)
+    if args.selection_only:
+        logger.info("--selection_only set: skipping retraining.")
+        return
 
     # ── 8. Retrain on selected subset ────────────────────────────────────────
     trainloader = DataLoader(
