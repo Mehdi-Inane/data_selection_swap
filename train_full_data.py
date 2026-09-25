@@ -1,7 +1,9 @@
 import argparse
+import json
 import os
 import random
 import logging
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -122,7 +124,14 @@ def main():
     logger.info(f"Starting full-dataset training on {device} for {NUM_EPOCHS} epochs...")
 
     # ── 4. Training Loop & Checkpoint Saving ───────────────────────────────────
+    # Per-epoch wall-clock lets aggregate_selection_comparison.py charge each
+    # selection method for the prefix of this trajectory it consumes.
+    epoch_seconds = []
+    timing_path = os.path.join(args.save_dir, "train_time.json")
     for epoch in range(1, NUM_EPOCHS + 1):
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
         model.train()
         running_loss = 0.0
 
@@ -138,6 +147,14 @@ def main():
             running_loss += loss.item()
 
         scheduler.step()
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        epoch_seconds.append(time.perf_counter() - t0)
+        with open(timing_path, 'w') as fh:
+            json.dump({"epoch_seconds": epoch_seconds,
+                       "total_seconds": sum(epoch_seconds),
+                       "device": torch.cuda.get_device_name() if device == 'cuda' else 'cpu'},
+                      fh, indent=4)
         avg_loss = running_loss / len(trainloader)
 
         # Logging
