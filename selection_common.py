@@ -6,11 +6,12 @@ train_kl_selection.py (the reference "KL-Faithful" algorithm) is the
 source of truth for the experimental protocol. Every baseline script
 in this suite —
 
+    train_random_selection.py
     train_herding_selection.py
     train_moderate_coreset_selection.py
     train_moso_selection.py
     train_el2n_selection.py
-    train_graphcut_facloc_selection.py
+    train_submodular_selection.py      (GraphCut / Facility Location)
 
 — imports from here, so that dataset splits, model architecture,
 optimizer/schedule, and evaluation protocol are byte-for-byte identical
@@ -25,11 +26,16 @@ Coreset / GraphCut / Facility Location's use of a single converged
 embedding).
 """
 
+import copy
 import glob
 import json
 import logging
+import math
 import os
 import random
+import re
+import time
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -110,7 +116,22 @@ def build_model(cfg: dict, num_classes: int, device: str) -> nn.Module:
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loaders — identical split logic/seed across every method
 # ─────────────────────────────────────────────────────────────────────────────
-def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int):
+def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'train') -> Subset:
+    """
+    The dataset view that selection methods *score* (not train on).
+    'train' reproduces train_kl_selection.py as-is (augmented views);
+    'test' scores un-augmented images, as the Moderate-DS and data_diet
+    reference implementations do. Indices are identical either way.
+    """
+    if scoring_transform == 'train':
+        return trainset
+    clean = copy.copy(cfg['full_train'])
+    clean.transform = cfg['testset'].transform
+    return Subset(clean, trainset.indices)
+
+
+def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int,
+                 scoring_transform: str = 'train'):
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     trainset, _ = random_split(
@@ -118,8 +139,9 @@ def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int):
         generator=torch.Generator().manual_seed(seed),
     )
     # shuffle=False: sample i of eval_loader always corresponds to selected_indices[i]
-    eval_loader = DataLoader(trainset, batch_size=batch_size, shuffle=False,
-                              pin_memory=True, num_workers=num_workers)
+    eval_loader = DataLoader(scoring_subset(cfg, trainset, scoring_transform),
+                             batch_size=batch_size, shuffle=False,
+                             pin_memory=True, num_workers=num_workers)
     testloader = DataLoader(cfg['testset'], batch_size=batch_size, shuffle=False,
                              pin_memory=True, num_workers=num_workers)
     return trainset, eval_loader, testloader, n_train
@@ -137,6 +159,25 @@ def list_checkpoints(checkpoint_dir: str):
     return ckpt_paths
 
 
+def checkpoint_epoch(path: str) -> int:
+    """Epoch number of a train_full_data.py checkpoint (checkpoint_XXX.pth)."""
+    m = re.search(r'(\d+)\.pth$', os.path.basename(path))
+    if m is None:
+        raise ValueError(f"Cannot parse epoch from checkpoint name: {path}")
+    return int(m.group(1))
+
+
+def reference_epochs_used(ckpt_paths) -> int:
+    """How far into the shared trajectory a method had to train (0 if none)."""
+    epochs = []
+    for path in ckpt_paths:
+        try:
+            epochs.append(checkpoint_epoch(path))
+        except ValueError:
+            pass
+    return max(epochs, default=0)
+
+
 def resolve_embedding_checkpoint(checkpoint_dir: str, override: str = None) -> str:
     """
     One-shot methods (Herding / Moderate Coreset / GraphCut / Facility
@@ -151,6 +192,11 @@ def resolve_embedding_checkpoint(checkpoint_dir: str, override: str = None) -> s
             raise ValueError(f"--embedding_checkpoint not found: {override}")
         return override
     return list_checkpoints(checkpoint_dir)[-1]
+
+
+def cosine_lr(base_lr: float, epoch: int, num_epochs: int) -> float:
+    """LR used *during* 1-indexed `epoch` by train_full_data.py's CosineAnnealingLR."""
+    return 0.5 * base_lr * (1.0 + math.cos(math.pi * (epoch - 1) / num_epochs))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,12 +229,66 @@ def extract_probs_features_targets(model: nn.Module, dataloader, device: str):
     return torch.cat(probs_buf), torch.cat(phi_buf), torch.cat(targets_buf)
 
 
+def logit_grads(probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """L = softmax - onehot: the logit-gradient factor used by KL-Faithful."""
+    one_hot = torch.zeros_like(probs).scatter_(1, targets.unsqueeze(1), 1.0)
+    return probs - one_hot
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-class kernels
+#   Herding and GraphCut / Facility Location are pairwise methods run
+#   within each class. They can consume either
+#     'features'        K = Φ Φ^T                 at the embedding checkpoint
+#     'grad'            K = (L L^T) ⊙ (Φ Φ^T)     at the embedding checkpoint
+#     'grad_trajectory' K = Σ_t (L_t L_t^T) ⊙ (Φ_t Φ_t^T)  over every checkpoint
+#   'grad_trajectory' is exactly the kernel KL-Faithful optimises over,
+#   restricted to one class — the "same information" ablation.
+# ─────────────────────────────────────────────────────────────────────────────
+def build_class_kernels(kind: str, model: nn.Module, eval_loader, checkpoint_dir: str,
+                         embedding_checkpoint: str, num_classes: int, device: str):
+    """Return (kernels: list[[n_c,n_c] CPU tensor], class_idx: list[LongTensor], ckpts_used)."""
+    if kind == 'grad_trajectory':
+        ckpts = list_checkpoints(checkpoint_dir)
+    else:
+        ckpts = [resolve_embedding_checkpoint(checkpoint_dir, embedding_checkpoint)]
+
+    kernels = class_idx = None
+    for ckpt in ckpts:
+        model.load_state_dict(torch.load(ckpt, map_location=device))
+        probs, phi, targets = extract_probs_features_targets(model, eval_loader, device)
+        if class_idx is None:
+            class_idx = [torch.where(targets == c)[0] for c in range(num_classes)]
+            kernels = [None] * num_classes
+        L = logit_grads(probs, targets) if kind != 'features' else None
+        for c, idx in enumerate(class_idx):
+            phi_c = phi[idx].to(device)
+            K = phi_c @ phi_c.T
+            if L is not None:
+                L_c = L[idx].to(device)
+                K = K * (L_c @ L_c.T)
+            K = K.cpu()
+            kernels[c] = K if kernels[c] is None else kernels[c] + K
+    return kernels, class_idx, ckpts
+
+
+def kernel_to_similarity(K: torch.Tensor) -> torch.Tensor:
+    """
+    Non-negative similarity for submodular functions, following apricot's
+    own convention for metric='euclidean':  S = max(D) - D, with D the
+    RKHS distance D_ij = sqrt(K_ii + K_jj - 2 K_ij).
+    """
+    diag = torch.diagonal(K)
+    D = (diag.unsqueeze(0) + diag.unsqueeze(1) - 2.0 * K).clamp_min(0.0).sqrt()
+    return D.max() - D
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-class budget helper
 #   Used by methods that are natively defined per class (Herding,
-#   Moderate Coreset, GraphCut / Facility Location), so every class
-#   contributes budget * (class_count / n_train) samples, matching the
-#   public reference implementations linked for each method. Uses
+#   MoSo, GraphCut / Facility Location), so every class contributes
+#   budget * (class_count / n_train) samples, matching the public
+#   reference implementations linked for each method. Uses
 #   largest-remainder rounding so quotas sum exactly to `budget`.
 # ─────────────────────────────────────────────────────────────────────────────
 def per_class_budget(targets: torch.Tensor, num_classes: int, budget: int) -> torch.Tensor:
@@ -201,6 +301,78 @@ def per_class_budget(targets: torch.Tensor, num_classes: int, budget: int) -> to
         for c in frac_order[:remainder]:
             quota[c] += 1
     return quota  # LongTensor [num_classes]
+
+
+def per_class_topk(scores: torch.Tensor, targets: torch.Tensor, num_classes: int,
+                   budget: int) -> torch.Tensor:
+    quota = per_class_budget(targets, num_classes, budget)
+    selected = []
+    for c in range(num_classes):
+        idx = torch.where(targets == c)[0]
+        q = min(int(quota[c].item()), idx.numel())
+        if q > 0:
+            selected.append(idx[torch.topk(scores[idx], q).indices])
+    return torch.cat(selected)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Short full-data training (EL2N probes, MoSo surrogates)
+# ─────────────────────────────────────────────────────────────────────────────
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    for inputs, targets in loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        criterion(model(inputs), targets).backward()
+        optimizer.step()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Selection-time accounting
+#   Wall-clock, CUDA-synchronised, split into phases:
+#     extra_training : training the method needs beyond the shared
+#                      full-data trajectory (EL2N probes, MoSo surrogates)
+#     scoring        : checkpoint loading + forward/backward passes over
+#                      the training set to build features/scores/kernels
+#     selection      : the combinatorial rule that turns scores into indices
+#   `reference_epochs_used` records how much of the shared trajectory the
+#   method consumed, so aggregate_selection_comparison.py can add the
+#   amortised cost of those epochs from train_full_data.py's timing file.
+# ─────────────────────────────────────────────────────────────────────────────
+class SelectionTimer:
+    def __init__(self, device: str):
+        self.device = device
+        self.phases = {}
+
+    def _sync(self):
+        if self.device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    @contextmanager
+    def phase(self, name: str):
+        self._sync()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync()
+            self.phases[name] = self.phases.get(name, 0.0) + time.perf_counter() - t0
+
+    def total(self) -> float:
+        return sum(self.phases.values())
+
+
+def save_timing(path: str, timer: SelectionTimer, logger, **extra):
+    record = dict(
+        phases_seconds=timer.phases,
+        selection_seconds=timer.total(),
+        device=torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu',
+        **extra,
+    )
+    with open(path, 'w') as fh:
+        json.dump(record, fh, indent=4)
+    logger.info(f"Selection time: {timer.total():.1f}s  phases="
+                + ", ".join(f"{k}={v:.1f}s" for k, v in timer.phases.items()))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +389,7 @@ def get_save_paths(method: str, dataset: str, budget: int, seed: int) -> dict:
         indices=os.path.join(base_dir, f"{method}_{budget}_indices.pt"),
         metrics=os.path.join(base_dir, f"{method}_{budget}_metrics.json"),
         scores =os.path.join(base_dir, f"{method}_{budget}_scores.json"),
+        timing =os.path.join(base_dir, f"{method}_{budget}_timing.json"),
         log    =os.path.join(base_dir, f"{method}_{budget}_training.log"),
     )
 
@@ -248,6 +421,12 @@ def base_argparser(description: str):
                    help='Learning rate for the final retrain-on-subset stage')
     p.add_argument('--num_workers',    default=4,           type=int)
     p.add_argument('--download',       action='store_true', default=False)
+    p.add_argument('--scoring_transform', default='train', choices=['train', 'test'],
+                   help="Transform applied to the training set when scoring it. "
+                        "'train' matches train_kl_selection.py; use the same value "
+                        "for every method in a comparison.")
+    p.add_argument('--selection_only', action='store_true', default=False,
+                   help='Stop after saving indices + timing (skip retraining).')
     return p
 
 
@@ -306,3 +485,12 @@ def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, pat
         json.dump(accuracy_history, fh, indent=4)
     logger.info(f"Saved all artefacts to {paths['base_dir']}")
     return accuracy_history
+
+
+def finish(cfg, trainset, selected_indices, device, args, logger, paths):
+    """Save indices, then retrain unless --selection_only."""
+    torch.save(selected_indices, paths['indices'])
+    if args.selection_only:
+        logger.info("--selection_only set: skipping retraining.")
+        return
+    retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, paths)
