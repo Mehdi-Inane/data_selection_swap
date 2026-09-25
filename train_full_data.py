@@ -21,12 +21,55 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> dict:
+    """Return per-dataset hyper-params, transforms, and dataset objects."""
+    if dataset == 'cifar100':
+        mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
+        tf_tr = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
+        return dict(
+            num_classes=100, num_epochs=300, cifar_style=True,
+            full_train=datasets.CIFAR100(root=data_dir, train=True,  download=download, transform=tf_tr),
+            testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
+        )
+
+    elif dataset == 'imagenet':
+        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+        tf_tr = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        tf_te = transforms.Compose([
+            transforms.Resize(256), transforms.CenterCrop(224),
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        return dict(
+            num_classes=1000, num_epochs=350, cifar_style=False,
+            full_train=datasets.ImageFolder(os.path.join(data_dir, 'train'), transform=tf_tr),
+            testset   =datasets.ImageFolder(os.path.join(data_dir, 'val'),   transform=tf_te),
+        )
+
+    else:
+        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'cifar100' or 'imagenet'.")
+
 def main():
-    p = argparse.ArgumentParser(description="Train full CIFAR-10 reference model for KL-Faithful selection")
+    p = argparse.ArgumentParser(description="Train full reference model for KL-Faithful selection")
+    p.add_argument('--dataset', default='cifar100', choices=['cifar100', 'imagenet'])
+    p.add_argument('--data_dir', required=True, type=str,
+                   help='Root of the staged dataset (e.g. $SLURM_TMPDIR/cifar100_data)')
     p.add_argument('-seed', '--seed', default=42, type=int)
-    p.add_argument('--save_dir', type=str, 
-                   default='/home/mila/a/ahmedm/scratch/data_selection_swap/cifar100/checkpoints',
+    p.add_argument('--save_dir', type=str, required=True,
                    help='Directory to save model checkpoints')
+    p.add_argument('--download', action='store_true', default=False,
+                   help='Download dataset if not present')
+    p.add_argument('--batch_size', default=128, type=int)
+    p.add_argument('--num_workers', default=4, type=int)
+    p.add_argument('--lr', default=0.01, type=float)
     args = p.parse_args()
 
     set_seed(args.seed)
@@ -37,53 +80,43 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.StreamHandler()]
+        handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(args.save_dir, "train.log"))]
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Saving checkpoints to: {args.save_dir}")
+    logger.info(f"Dataset={args.dataset} | Saving checkpoints to: {args.save_dir}")
 
     # ── 2. Data Preparation & Split ────────────────────────────────────────────
-    # Must perfectly match the split used in data selection
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2023, 0.1994, 0.2010)),
-    ])
-
-    full_train = datasets.CIFAR100(root='data/', train=True, download=True, transform=transform_train)
-
+    cfg = get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    full_train = cfg['full_train']
+    
     n_val   = int(0.1 * len(full_train))
     n_train = len(full_train) - n_val
 
-    # Ensure the exact same 45k trainset is used to compute the trajectory
+    # Ensure the exact same trainset is used to compute the trajectory
     trainset, valset = random_split(
         full_train, 
         [n_train, n_val], 
         generator=torch.Generator().manual_seed(args.seed)
     )
 
-    BATCH_SIZE = 128
-    trainloader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=1)
+    trainloader = DataLoader(
+        trainset, batch_size=args.batch_size, shuffle=True, 
+        pin_memory=True, num_workers=args.num_workers
+    )
 
     # ── 3. Model & Optimizer Setup ─────────────────────────────────────────────
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    NUM_CLASSES = cfg['num_classes']
+    NUM_EPOCHS = cfg['num_epochs']
     
-
-    num_classes = 100 if 'cifar100' in args.save_dir else 10
-    print(num_classes)
-
-    model = ResNet18(num_classes=num_classes)
-    model.conv1 = nn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
-    model.maxpool = nn.Identity()
+    model = ResNet18(num_classes=NUM_CLASSES)
+    if cfg['cifar_style']:
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        model.maxpool = nn.Identity()
     model = model.to(device)
-
-    NUM_EPOCHS = 350
-    LR = 0.01
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9, weight_decay=5e-4, nesterov=True)
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4, nesterov=True)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
 
     logger.info(f"Starting full-dataset training on {device} for {NUM_EPOCHS} epochs...")

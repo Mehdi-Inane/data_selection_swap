@@ -164,8 +164,8 @@ def save_csv(results: dict, out_path: str) -> None:
 def main() -> None:
     results = collect_results()
     print_table(results)
-    save_json(results, os.path.join(BASE_DIR, "aggregated_results.json"))
-    save_csv(results,  os.path.join(BASE_DIR, "aggregated_results.csv"))
+    save_json(results, os.path.join(BASE_DIR, "aggregated_results_cifar10.json"))
+    save_csv(results,  os.path.join(BASE_DIR, "aggregated_results_cifar10.csv"))
 
 
 if __name__ == "__main__":
