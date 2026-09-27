@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=imagenet_kl_selection
-#SBATCH --output=logs/new_kl_select_imagenet_%A_%a.txt
-#SBATCH --error=logs/new_kl_select_imagenet_%A_%a.txt
+#SBATCH --output=logs/new_kl_select_truncated_cifar100_%A_%a.txt
+#SBATCH --error=logs/new_kl_select_truncated_cifar100_%A_%a.txt
 #SBATCH --array=0-19                 # 20 tasks = 1 dataset (ImageNet) × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
@@ -18,7 +18,7 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
-DATASET="imagenet"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
+DATASET="cifar100"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 
@@ -26,6 +26,8 @@ MAX_ITERS=2000
 BATCH_SIZE=128
 LR=0.01
 NUM_WORKERS=4
+NUM_CHECKPOINTS=10   # Use only the first K checkpoints in CHECKPOINT_DIR to build the
+                     # trajectory kernel (0 = use every checkpoint found).
 
 # ── Map flat task ID → (fraction, seed) ─────────────────────────────
 # Array is 0-19. Divide by 5 for the fraction index, modulo 5 for the seed index.
@@ -56,13 +58,14 @@ echo " Dataset             : $DATASET"
 echo " Fraction            : $FRACTION"
 echo " Seed                : $SEED"
 echo " Checkpoint Dir      : $CHECKPOINT_DIR"
+echo " Num Checkpoints (K) : $NUM_CHECKPOINTS"
 echo " Local Data Dir      : $LOCAL_DATA"
 echo " Max Iterations      : $MAX_ITERS"
 echo "=================================================="
 
 echo ""
 echo "--------------------------------------------------"
-echo " Running KL-Faithful Selection | dataset=$DATASET | fraction=$FRACTION | seed=$SEED"
+echo " Running KL-Faithful Selection | dataset=$DATASET | fraction=$FRACTION | seed=$SEED | K=$NUM_CHECKPOINTS"
 echo "--------------------------------------------------"
 
 srun python train_kl_selection.py \
@@ -71,6 +74,7 @@ srun python train_kl_selection.py \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --data_dir "$LOCAL_DATA" \
+    --num_checkpoints "$NUM_CHECKPOINTS" \
     --max_iters "$MAX_ITERS" \
     --batch_size "$BATCH_SIZE" \
     --lr "$LR" \

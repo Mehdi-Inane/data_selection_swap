@@ -23,6 +23,15 @@ compute_h without ever materialising G:
 For ImageNet with many checkpoints, an optional sparse-Rademacher JL
 (Achlioptas 2003) can be applied independently to L and Φ, reducing
 each to k dims (e.g. k=64 → 600 MB / ckpt for ImageNet, approximate).
+
+Checkpoint subsampling
+──────────────────────
+--num_checkpoints K (default 10) restricts the trajectory to the
+first K checkpoints found in --checkpoint_dir (sorted the same way as
+before, i.e. by filename, which is how they are indexed on disk), so
+the kernel is built from only the early/first part of the training
+run instead of the full trajectory. Pass --num_checkpoints 0 to use
+every checkpoint in the directory, matching the previous behaviour.
 """
 
 import argparse
@@ -273,6 +282,10 @@ def main():
                    help='Root of the staged dataset (e.g. $SLURM_TMPDIR/cifar100_data)')
     p.add_argument('--proj_dim',       default=0,           type=int,
                    help='Sparse-JL target dim per factor (0 = exact, no JL)')
+    p.add_argument('--num_checkpoints', default=10,         type=int,
+                   help='Use only the first K checkpoints (sorted by filename, i.e. by their '
+                        'index in --checkpoint_dir) to build the trajectory kernel. '
+                        '0 = use every checkpoint found (previous behaviour).')
     p.add_argument('--max_iters',      default=5000,        type=int,
                    help='Maximum iterations for single-swap descent')
     p.add_argument('--batch_size',     default=128,         type=int,
@@ -291,6 +304,25 @@ def main():
 
     set_seed(args.seed)
 
+    # ── 0. Resolve checkpoint trajectory ─────────────────────────────────────
+    #      Done before any file naming below, so the saved-file names can
+    #      record how many checkpoints were *actually* used (post-clamping),
+    #      not just the requested --num_checkpoints value.
+    if not os.path.isdir(args.checkpoint_dir):
+        raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
+    ckpt_paths_all = sorted(glob.glob(os.path.join(args.checkpoint_dir, "*.pth")))
+    if not ckpt_paths_all:
+        raise ValueError(f"No .pth checkpoints in {args.checkpoint_dir}")
+
+    n_available = len(ckpt_paths_all)
+    ckpt_paths  = ckpt_paths_all[:args.num_checkpoints] if args.num_checkpoints > 0 else ckpt_paths_all
+    num_ckpts_used = len(ckpt_paths)
+    ckpt_warning = None
+    if args.num_checkpoints > n_available:
+        ckpt_warning = (f"--num_checkpoints={args.num_checkpoints} exceeds the "
+                         f"{n_available} checkpoints found in {args.checkpoint_dir}; "
+                         f"using all {n_available}.")
+
     # ── 1. Dataset ───────────────────────────────────────────────────────────
     cfg         = get_dataset_config(args.dataset, args.data_dir, download=args.download)
     NUM_CLASSES = cfg['num_classes']
@@ -306,27 +338,35 @@ def main():
     os.makedirs(base_dir, exist_ok=True)
 
     # ── 2. Logging ───────────────────────────────────────────────────────────
+    # file_prefix carries the checkpoint count (K{num_ckpts_used}) so that
+    # sweeps over --num_checkpoints for the same (dataset, budget, seed) land
+    # in the same base_dir without ever overwriting each other's files.
+    file_prefix = f"kl_faithful_{budget}_K{num_ckpts_used}"
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(base_dir, f"kl_faithful_{budget}_training.log")),
+            logging.FileHandler(os.path.join(base_dir, f"{file_prefix}_training.log")),
             logging.StreamHandler(),
         ],
     )
     logger = logging.getLogger(__name__)
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+                f"num_checkpoints={num_ckpts_used}/{n_available}  "
                 f"device={'cuda' if torch.cuda.is_available() else 'cpu'}")
+    if ckpt_warning:
+        logger.warning(ckpt_warning)
 
     BATCH_SIZE = args.batch_size
     LR         = args.lr
     device     = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    MODEL_SAVE_PATH   = os.path.join(base_dir, f"kl_faithful_{budget}_model.pth")
-    INDICES_SAVE_PATH = os.path.join(base_dir, f"kl_faithful_{budget}_indices.pt")
-    METRICS_SAVE_PATH = os.path.join(base_dir, f"kl_faithful_{budget}_metrics.json")
-    OBJ_SAVE_PATH     = os.path.join(base_dir, f"kl_faithful_{budget}_objective.json")
-    TIMING_SAVE_PATH  = os.path.join(base_dir, f"kl_faithful_{budget}_timing.json")
+    MODEL_SAVE_PATH   = os.path.join(base_dir, f"{file_prefix}_model.pth")
+    INDICES_SAVE_PATH = os.path.join(base_dir, f"{file_prefix}_indices.pt")
+    METRICS_SAVE_PATH = os.path.join(base_dir, f"{file_prefix}_metrics.json")
+    OBJ_SAVE_PATH     = os.path.join(base_dir, f"{file_prefix}_objective.json")
+    TIMING_SAVE_PATH  = os.path.join(base_dir, f"{file_prefix}_timing.json")
 
     # ── 3. Data loaders ──────────────────────────────────────────────────────
     trainset, _ = random_split(
@@ -368,14 +408,14 @@ def main():
         R_L = R_Phi = None
 
     # ── 6. Trajectory extraction ─────────────────────────────────────────────
-    if not os.path.isdir(args.checkpoint_dir):
-        raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
-    ckpt_paths = sorted(glob.glob(os.path.join(args.checkpoint_dir, "*.pth")))
-    if not ckpt_paths:
-        raise ValueError(f"No .pth checkpoints in {args.checkpoint_dir}")
+    # ckpt_paths was already resolved and truncated to the first K in Step 0.
+    logger.info(
+        f"Using the first {num_ckpts_used} of {n_available} checkpoints found in "
+        f"{args.checkpoint_dir} (--num_checkpoints={args.num_checkpoints}) "
+        f"to build the trajectory kernel."
+    )
 
     timer = common.SelectionTimer(device)
-    logger.info(f"Found {len(ckpt_paths)} checkpoints — extracting factored features ...")
     with timer.phase('scoring'):
         LP_list = load_trajectory_factored_features(
             ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi,
@@ -392,7 +432,9 @@ def main():
 
     common.save_timing(TIMING_SAVE_PATH, timer, logger, method='kl_faithful',
                        reference_epochs_used=common.reference_epochs_used(ckpt_paths),
-                       swap_iterations=total_iters)
+                       swap_iterations=total_iters,
+                       num_checkpoints_available=n_available,
+                       num_checkpoints_used=num_ckpts_used)
     torch.save(selected_indices, INDICES_SAVE_PATH)
     with open(OBJ_SAVE_PATH, 'w') as fh:
         json.dump(objective_history, fh, indent=4)
