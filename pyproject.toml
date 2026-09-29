@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=65.5"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-selection-swap"
+version = "0.1.0"
+description = "Faithful data selection with trajectory-weighted gradient matching"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+data-selection-train-full = "data_selection_swap.training.full_data:main"
+data-selection-train-reference = "data_selection_swap.training.reference:main"
+data-selection-kl = "data_selection_swap.selection.kl:main"
+data-selection-kl-full = "data_selection_swap.selection.kl_full:main"
+data-selection-aggregate = "data_selection_swap.analysis.comparison:main"
+data-selection-score = "data_selection_swap.analysis.score_subsets:main"
+data-selection-plot-checkpoints = "data_selection_swap.analysis.checkpoint_ablation:main"
