@@ -28,6 +28,7 @@ embedding).
 
 import copy
 import glob
+import heapq
 import json
 import logging
 import math
@@ -148,6 +149,38 @@ def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Swap candidate enumeration
+#   Every swap-based selector ranks exchanges by the linear term
+#   h_j - h_i. Enumerating pairs in non-decreasing order of it is what
+#   lets an exact search stop early: the curvature term is non-negative,
+#   so once some pair's exact change beats the next unexamined linear
+#   term, no remaining pair can do better.
+# ─────────────────────────────────────────────────────────────────────────────
+def ranked_pairs(drop_idx, drop_h, add_idx, add_h):
+    """
+    Yield (linear, i, j) over drop x add in non-decreasing add_h - drop_h.
+
+    drop_h must be sorted descending and add_h ascending. The linear term
+    is then non-decreasing in both positions, so a heap over the frontier
+    yields pairs in order while holding at most O(|drop|) of them; the
+    full |drop| x |add| product is never materialised. Each pair is
+    pushed exactly once: (a, b>0) from (a, b-1), and (a, 0) from
+    (a-1, 0).
+    """
+    na, nb = len(drop_h), len(add_h)
+    if na == 0 or nb == 0:
+        return
+    heap = [(float(add_h[0] - drop_h[0]), 0, 0)]
+    while heap:
+        lin, a, b = heapq.heappop(heap)
+        yield lin, int(drop_idx[a]), int(add_idx[b])
+        if b + 1 < nb:
+            heapq.heappush(heap, (float(add_h[b + 1] - drop_h[a]), a, b + 1))
+        if b == 0 and a + 1 < na:
+            heapq.heappush(heap, (float(add_h[0] - drop_h[a + 1]), a + 1, 0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Checkpoints
 # ─────────────────────────────────────────────────────────────────────────────
 def list_checkpoints(checkpoint_dir: str):
@@ -197,6 +230,44 @@ def resolve_embedding_checkpoint(checkpoint_dir: str, override: str = None) -> s
 def cosine_lr(base_lr: float, epoch: int, num_epochs: int) -> float:
     """LR used *during* 1-indexed `epoch` by train_full_data.py's CosineAnnealingLR."""
     return 0.5 * base_lr * (1.0 + math.cos(math.pi * (epoch - 1) / num_epochs))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optimizer factory
+#   The single place an optimizer is built, so the reference trajectory
+#   (train_reference.py) and the retrain-on-subset loop below cannot drift
+#   apart. Scoring checkpoints from an SGD reference and then retraining
+#   the selected model with Adam confounds the comparison, so the selection
+#   scripts default --retrain_optimizer to whatever the objective assumed.
+# ─────────────────────────────────────────────────────────────────────────────
+def load_or_create_init(model: nn.Module, path, logger=None) -> str:
+    """
+    Pin the retraining initialisation so two selectors are compared from
+    the same weights. The first caller writes the file, everyone after
+    loads it; without this, each run starts from its own random draw and
+    part of any accuracy gap is initialisation noise.
+    """
+    if not path:
+        return "fresh initialisation (pass --init_ckpt to share one)"
+    if os.path.exists(path):
+        model.load_state_dict(torch.load(path, map_location=next(model.parameters()).device))
+        return f"initialisation loaded from {path}"
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    torch.save({k: v.detach().cpu().clone() for k, v in model.state_dict().items()}, path)
+    if logger:
+        logger.info(f"Wrote a shared retraining initialisation to {path}")
+    return f"initialisation saved to {path}"
+
+
+def build_optimizer(params, kind: str, lr: float, weight_decay: float = 5e-4,
+                    betas=(0.9, 0.999), eps: float = 1e-8):
+    if kind == 'sgd':
+        return optim.SGD(params, lr=lr, momentum=0.9,
+                         weight_decay=weight_decay, nesterov=True)
+    if kind in ('adam', 'adamw'):
+        cls = optim.AdamW if kind == 'adamw' else optim.Adam
+        return cls(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+    raise ValueError(f"Unknown optimizer: {kind!r}. Choose sgd, adam or adamw.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -446,12 +517,17 @@ def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, pat
                              pin_memory=True, num_workers=args.num_workers)
 
     model = build_model(cfg, cfg['num_classes'], device)
+    init_note = load_or_create_init(model, getattr(args, 'init_ckpt', None), logger)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9,
-                           weight_decay=5e-4, nesterov=True)
+    kind = getattr(args, 'retrain_optimizer', 'sgd')
+    optimizer = build_optimizer(model.parameters(), kind, args.lr,
+                                betas=(getattr(args, 'beta1', 0.9),
+                                       getattr(args, 'beta2', 0.999)),
+                                eps=getattr(args, 'adam_eps', 1e-8))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['num_epochs'])
 
-    logger.info(f"Retraining on subset of size {len(selected_indices)} ...")
+    logger.info(f"Retraining on subset of size {len(selected_indices)} "
+                f"with {kind} (lr={args.lr}), {init_note} ...")
     accuracy_history = {}
 
     for epoch in range(1, cfg['num_epochs'] + 1):
