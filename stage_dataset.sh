@@ -6,10 +6,29 @@
 #
 #   stage_dataset "$DATASET" "$LOCAL_DATA"
 #
-# Supported datasets: "cifar100", "imagenet"
+# Supported datasets: "cifar10", "cifar100", "imagenet"
 
 IMAGENET_RAW_DIR="/network/datasets/imagenet"
+CIFAR10_ARCHIVE="/network/datasets/cifar10/cifar-10-python.tar.gz"
 CIFAR100_ARCHIVE="/network/datasets/cifar100/cifar-100-python.tar.gz"
+
+# Extract a CIFAR tarball into $local_data unless it is already there.
+# Args: <pretty name> <archive path> <folder created by the archive> <local_data>
+_stage_cifar() {
+    local name="$1"
+    local archive="$2"
+    local marker="$3"
+    local local_data="$4"
+
+    if [ -d "$local_data/$marker" ]; then
+        echo "$name already extracted at $local_data/$marker, skipping."
+    elif [ -f "$archive" ]; then
+        echo "Extracting $name archive to $local_data ..."
+        tar -xzf "$archive" -C "$local_data"
+    else
+        echo "Warning: $archive not found. Python script will attempt automatic download." >&2
+    fi
+}
 
 stage_dataset() {
     local dataset="$1"
@@ -17,13 +36,11 @@ stage_dataset() {
 
     mkdir -p "$local_data"
 
-    if [ "$dataset" = "cifar100" ]; then
-        if [ -f "$CIFAR100_ARCHIVE" ]; then
-            echo "Extracting CIFAR-100 archive to $local_data ..."
-            tar -xzf "$CIFAR100_ARCHIVE" -C "$local_data"
-        else
-            echo "Warning: $CIFAR100_ARCHIVE not found. Python script will attempt automatic download." >&2
-        fi
+    if [ "$dataset" = "cifar10" ]; then
+        _stage_cifar "CIFAR-10" "$CIFAR10_ARCHIVE" "cifar-10-batches-py" "$local_data"
+
+    elif [ "$dataset" = "cifar100" ]; then
+        _stage_cifar "CIFAR-100" "$CIFAR100_ARCHIVE" "cifar-100-python" "$local_data"
 
     elif [ "$dataset" = "imagenet" ]; then
         if [ ! -d "$IMAGENET_RAW_DIR" ]; then
@@ -63,7 +80,7 @@ stage_dataset() {
         fi
 
     else
-        echo "Error: Unknown dataset '$dataset'. Choose 'cifar100' or 'imagenet'." >&2
+        echo "Error: Unknown dataset '$dataset'. Choose 'cifar10', 'cifar100' or 'imagenet'." >&2
         return 1
     fi
 }

@@ -24,6 +24,24 @@ For ImageNet with many checkpoints, an optional sparse-Rademacher JL
 (Achlioptas 2003) can be applied independently to L and Φ, reducing
 each to k dims (e.g. k=64 → 600 MB / ckpt for ImageNet, approximate).
 
+Learning-rate weighting
+───────────────────────
+The Gram matrix of the QP is
+
+    P_0 = Σ_k  η_k  G_k G_k^T,      q_i ∝ Σ_k η_k <g_{k,i}, ∇L_S(θ_k)>
+
+i.e. each checkpoint's kernel is weighted by the learning rate η_k of the
+SGD step taken *from* that checkpoint.  Since  K_k = (L_k L_k^T) ⊙ (Φ_k Φ_k^T),
+scaling L_k by sqrt(η_k) scales K_k by exactly η_k (note the square root:
+the kernel is quadratic in L).  Both P_0 and the c_sum term (used for q) are
+built from the scaled factors, so the rest of the algorithm is unchanged.
+
+The schedule is recomputed by simulating CosineAnnealingLR with a dummy
+optimizer (no training needed). A checkpoint saved after e epochs
+(checkpoint_{e}.pth, e = 0 being the initialization) holds θ_e, and the step
+from θ_e uses lrs[e], where lrs[t] is the LR of epoch t+1. Pass
+--no_lr_weighting to recover the previous, unweighted behaviour.
+
 Checkpoint subsampling
 ──────────────────────
 --num_checkpoints K (default 10) restricts the trajectory to the
@@ -41,6 +59,7 @@ import logging
 import math
 import os
 import random
+import re
 
 import numpy as np
 import torch
@@ -69,6 +88,35 @@ def set_seed(seed=42):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Learning-rate schedule (recomputed, since it was not saved during training)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_lr_schedule(base_lr, num_epochs, T_max=None):
+    """
+    Simulate the reference run's SGD + CosineAnnealingLR with a dummy optimizer.
+    lrs[t] is the LR used during epoch t+1 (0-indexed list), i.e. the LR of the
+    step taken from checkpoint t (theta_t).
+    """
+    dummy = torch.nn.Parameter(torch.zeros(1))
+    opt   = optim.SGD([dummy], lr=base_lr, momentum=0.9, weight_decay=5e-4, nesterov=True)
+    sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=T_max or num_epochs)
+    lrs = []
+    for _ in range(num_epochs):
+        lrs.append(opt.param_groups[0]["lr"])
+        opt.step()
+        sched.step()
+    return lrs
+
+
+def checkpoint_epoch(path: str) -> int:
+    """Epoch number encoded in a checkpoint filename, e.g. checkpoint_007.pth -> 7."""
+    m = re.search(r'(\d+)\.pth$', os.path.basename(path))
+    if m is None:
+        raise ValueError(f"Cannot parse an epoch number from checkpoint name: {path}")
+    return int(m.group(1))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dataset configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -89,7 +137,7 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
         )
 
     elif dataset == 'imagenet':
-        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225) # verified correct
         tf_tr = transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
@@ -173,12 +221,25 @@ def extract_factored_features(
 
 
 def load_trajectory_factored_features(model, dataloader, checkpoint_paths, device,
-                                       R_L=None, R_Phi=None):
-    """Load T checkpoints in order; extract (L_t, Φ_t) for each."""
+                                       R_L=None, R_Phi=None, etas=None):
+    """
+    Load T checkpoints in order; extract (L_t, Φ_t) for each.
+
+    etas : optional list of learning rates, one per checkpoint. If given, L_t is
+           scaled by sqrt(eta_t) so that the kernel (L L^T) ⊙ (Φ Φ^T) of that
+           checkpoint is scaled by exactly eta_t.
+    """
+    if etas is not None:
+        assert len(etas) == len(checkpoint_paths)
     LP_list = []
-    for ckpt in checkpoint_paths:
-        model.load_state_dict(torch.load(ckpt, map_location=device))
+    for idx, ckpt in enumerate(checkpoint_paths):
+        state = torch.load(ckpt, map_location=device)
+        if isinstance(state, dict) and 'model' in state:   # full training checkpoint
+            state = state['model']
+        model.load_state_dict(state)
         L, Phi = extract_factored_features(model, dataloader, device, R_L=R_L, R_Phi=R_Phi)
+        if etas is not None:
+            L = L * math.sqrt(etas[idx])
         LP_list.append((L, Phi))
     return LP_list
 
@@ -292,6 +353,12 @@ def main():
                    help='Batch size for dataloaders')
     p.add_argument('--lr',             default=0.01,        type=float,
                    help='Learning rate for retraining')
+    p.add_argument('--ref_lr',         default=0.01,        type=float,
+                   help='Base learning rate used to train the reference trajectory '
+                        '(needed to rebuild its cosine schedule for the eta_k weights)')
+    p.add_argument('--no_lr_weighting', action='store_true', default=False,
+                   help='Disable the eta_k weighting of the trajectory kernel '
+                        '(recovers the previous, unweighted objective)')
     p.add_argument('--num_workers',    default=4,           type=int,
                    help='Data loader workers')
     p.add_argument('--download',       action='store_true', default=False,
@@ -303,6 +370,7 @@ def main():
     args = p.parse_args()
 
     set_seed(args.seed)
+    lr_weighted = not args.no_lr_weighting
 
     # ── 0. Resolve checkpoint trajectory ─────────────────────────────────────
     #      Done before any file naming below, so the saved-file names can
@@ -341,7 +409,9 @@ def main():
     # file_prefix carries the checkpoint count (K{num_ckpts_used}) so that
     # sweeps over --num_checkpoints for the same (dataset, budget, seed) land
     # in the same base_dir without ever overwriting each other's files.
-    file_prefix = f"kl_faithful_{budget}_K{num_ckpts_used}"
+    # The "_lrw" suffix marks learning-rate-weighted runs, so they never
+    # overwrite the earlier unweighted results.
+    file_prefix = f"kl_faithful_{budget}_K{num_ckpts_used}" + ("_lrw" if lr_weighted else "")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -354,6 +424,7 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
                 f"num_checkpoints={num_ckpts_used}/{n_available}  "
+                f"lr_weighted={lr_weighted}  "
                 f"device={'cuda' if torch.cuda.is_available() else 'cpu'}")
     if ckpt_warning:
         logger.warning(ckpt_warning)
@@ -367,6 +438,7 @@ def main():
     METRICS_SAVE_PATH = os.path.join(base_dir, f"{file_prefix}_metrics.json")
     OBJ_SAVE_PATH     = os.path.join(base_dir, f"{file_prefix}_objective.json")
     TIMING_SAVE_PATH  = os.path.join(base_dir, f"{file_prefix}_timing.json")
+    ETAS_SAVE_PATH    = os.path.join(base_dir, f"{file_prefix}_etas.json")
 
     # ── 3. Data loaders ──────────────────────────────────────────────────────
     trainset, _ = random_split(
@@ -407,7 +479,25 @@ def main():
         )
         R_L = R_Phi = None
 
-    # ── 6. Trajectory extraction ─────────────────────────────────────────────
+    # ── 6. Learning rates eta_k for the selected checkpoints ─────────────────
+    # lrs has NUM_EPOCHS+1 entries so that theta_T (last checkpoint, no step
+    # taken from it) gets eta = 0, which is exactly the cosine value at t = T.
+    etas = None
+    if lr_weighted:
+        lrs = get_lr_schedule(args.ref_lr, NUM_EPOCHS + 1, T_max=NUM_EPOCHS)
+        epochs_used = [checkpoint_epoch(pth) for pth in ckpt_paths]
+        if max(epochs_used) > NUM_EPOCHS:
+            raise ValueError(f"Checkpoint epoch {max(epochs_used)} exceeds NUM_EPOCHS={NUM_EPOCHS}.")
+        etas = [lrs[e] for e in epochs_used]
+        logger.info(f"LR weighting: ref_lr={args.ref_lr}, T_max={NUM_EPOCHS}. "
+                    f"eta for first checkpoints (epoch: eta): "
+                    + ", ".join(f"{e}: {eta:.6f}" for e, eta in list(zip(epochs_used, etas))[:5])
+                    + (" ..." if len(etas) > 5 else ""))
+        with open(ETAS_SAVE_PATH, 'w') as fh:
+            json.dump({"ref_lr": args.ref_lr, "T_max": NUM_EPOCHS,
+                       "checkpoint_epochs": epochs_used, "etas": etas}, fh, indent=4)
+
+    # ── 7. Trajectory extraction ─────────────────────────────────────────────
     # ckpt_paths was already resolved and truncated to the first K in Step 0.
     logger.info(
         f"Using the first {num_ckpts_used} of {n_available} checkpoints found in "
@@ -418,10 +508,10 @@ def main():
     timer = common.SelectionTimer(device)
     with timer.phase('scoring'):
         LP_list = load_trajectory_factored_features(
-            ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi,
+            ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi, etas=etas,
         )
 
-    # ── 7. Algorithm 1 ───────────────────────────────────────────────────────
+    # ── 8. Algorithm 1 ───────────────────────────────────────────────────────
     logger.info(f"Running single-swap descent  (budget={budget}/{n_train}) ...")
     with timer.phase('selection'):
         selected_indices, objective_history, total_iters = gradient_ranked_single_swap(
@@ -442,7 +532,7 @@ def main():
         logger.info("--selection_only set: skipping retraining.")
         return
 
-    # ── 8. Retrain on selected subset ────────────────────────────────────────
+    # ── 9. Retrain on selected subset ────────────────────────────────────────
     trainloader = DataLoader(
         Subset(trainset, selected_indices),
         batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=args.num_workers,
@@ -488,7 +578,7 @@ def main():
                         f"Test Acc: {acc:.2f}% | "
                         f"Train Loss: {running_loss / len(trainloader):.4f}")
 
-    # ── 9. Save ───────────────────────────────────────────────────────────────
+    # ── 10. Save ──────────────────────────────────────────────────────────────
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
     with open(METRICS_SAVE_PATH, 'w') as fh:
         json.dump(accuracy_history, fh, indent=4)
