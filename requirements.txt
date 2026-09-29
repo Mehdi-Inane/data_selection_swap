@@ -10,7 +10,6 @@ sphinxcontrib-bibtex
 sphinx-rtd-theme
 matplotlib
 numpy>=1.19.0
-torchvision
 pillow>=8.4.0
 pandas>=1.1.0
 torchtext
@@ -19,7 +18,7 @@ pyyaml~=5.4.1
 dotmap~=1.3.24
 ray[tune]
 ray[default]
--i https://test.pypi.org/simple/ 
+-i https://test.pypi.org/simple/
 --extra-index-url https://pypi.org/simple/
 submodlib
 datasets

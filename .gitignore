@@ -1,6 +1,16 @@
-logs/*
 __pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+build/
+dist/
+*.egg-info/
+
 data/
+logs/
+outputs/
+tmp/
+
 *.pth
 *.pt
 *.log
