@@ -1,0 +1,607 @@
+"""
+Algorithm 3 (gradient-ranked single-swap descent) over *all* trainable
+parameters.
+
+Why a second script
+───────────────────
+train_kl_selection.py restricts the gradient to the last layer, where
+g_i = vec(l_i phi_i^T) factorises and the kernel column P[:,i] costs
+O(n(C+F)). Nothing like that holds for the full network: convolutional
+per-sample gradients do not factorise, and storing G_t for ResNet-18 on
+CIFAR-100 would need 45000 x 11.2M x 4 B = 2 TB per checkpoint. P is not
+available here, in any form, ever.
+
+It is not needed. Write u_I^k = sum_{i in I} g_i^k. Then
+
+    D(alpha) = sum_k w_k || u_I^k/m - gbar_k ||^2_{M_k}                (1)
+
+which is the manuscript's trajectory-averaged gradient discrepancy, and
+which differs from f(alpha) = (1/m^2) alpha'P alpha + q'alpha only by the
+constant sum_k w_k ||gbar_k||^2. So D and f have identical swap
+decisions, and D is the non-negative one, so it is what gets reported.
+
+Everything the algorithm needs follows from (1) with *aggregate*
+gradients only:
+
+  ranking    h_i = dD/dalpha_i = (2/m) sum_k w_k <g_i^k, M_k v_k>,
+             v_k = u_I^k/m - gbar_k. Fixing the tangent M_k v_k turns
+             all n of these into one forward-mode JVP sweep per
+             checkpoint — one forward pass over the pool, no per-sample
+             gradient ever materialised. h runs through the model's
+             float32 ops, so it is used only to *rank* candidates.
+
+  acceptance for any delta in {-1,0,1}^n with 1'delta = 0,
+
+                 Delta = sum_k w_k [ (2/m) <v_k, M_k u_delta^k>
+                                     + (1/m^2) ||u_delta^k||^2_{M_k} ]
+
+             where u_delta^k is an aggregate gradient over the handful of
+             swapped points. This is delta'h + (1/m^2) delta'P delta
+             regrouped so that every term is an inner product of float64
+             aggregates: near a converged subset the two contributions
+             nearly cancel, and reusing the float32 h here would let its
+             rounding error decide whether a swap is accepted. It is
+             exact, not a linearisation, since D is quadratic in alpha.
+             The same u_delta^k then updates u_I^k, so the accept test
+             costs nothing extra.
+
+Cost per iteration is therefore one forward pass over the pool per
+checkpoint: about 1760 batches at n = 45000, batch 256 and K = 10. The
+2000 single swaps alg3.sh asks for would take hours, so --max_iters
+defaults to 200 — which may well stop before the search settles, and is
+why the stopping reason, the final gradient gap and the best rejected
+exact change are all logged and saved rather than left implicit.
+--swaps_per_sweep amortises the sweep over a block of exchanges, backing
+off when the block's exact change is not negative; --candidates relaxes
+Algorithm 3's stopping rule. At --swaps_per_sweep 1 --candidates 1 the
+loop is literally Algorithm 3.
+
+Objective weighting (--optimizer) is shared with train_kl_selection.py
+and documented in reference_trajectory.py: uniform, sgd, adam (the KL
+weighting, w_k = sum eta_s a_s^2 with M_k = D_k^2) and adam_update
+(the squared update mismatch, w_k = sum eta_s^2 a_s^2).
+
+This is Algorithm 3 over full-network gradients, not the manuscript's
+exact best-swap search. The exact search needs the per-pair curvature
+||g_j - g_i||^2_M, which is unavailable here for the same reason P is;
+train_kl_selection.py --rule best does it on the last-layer kernel.
+"""
+
+import argparse
+import json
+import logging
+import os
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import random_split
+
+import d_alpha
+import reference_trajectory as ref
+import selection_common as common
+from selection_common import get_dataset_config, set_seed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Functional plumbing
+#   Parameters are carried as dicts rather than loaded into the module,
+#   so the JVP sweep and the aggregate backwards run against exactly the
+#   same weights and buffers, and no checkpoint is re-read from disk
+#   inside the swap loop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def split_state(model, state_dict, device):
+    """(params, buffers) for functional_call, params in module order."""
+    names = {n for n, p in model.named_parameters() if p.requires_grad}
+    params, buffers = {}, {}
+    for n, v in state_dict.items():
+        (params if n in names else buffers)[n] = v.to(device)
+    missing = names - set(params)
+    if missing:
+        raise KeyError(f"Checkpoint is missing trainable parameters: {sorted(missing)}")
+    return params, buffers
+
+
+def flat_dim(params):
+    return sum(v.numel() for v in params.values())
+
+
+def flatten(d, order):
+    return torch.cat([d[n].reshape(-1) for n in order])
+
+
+def unflatten(flat, template, order):
+    out, off = {}, 0
+    for n in order:
+        v = template[n]
+        out[n] = flat[off:off + v.numel()].view_as(v)
+        off += v.numel()
+    return out
+
+
+def grad_sum(model, params, buffers, X, Y, index, batch_size, order):
+    """sum_{i in index} g_i, flattened, in float64."""
+    def loss(p, xb, yb):
+        logits = torch.func.functional_call(model, {**p, **buffers}, (xb,))
+        return F.cross_entropy(logits, yb, reduction='sum')
+
+    total = torch.zeros(flat_dim(params), dtype=torch.float64, device=X.device)
+    for start in range(0, index.numel(), batch_size):
+        sel = index[start:start + batch_size]
+        g = torch.func.grad(loss)(params, X[sel], Y[sel])
+        total += flatten(g, order).double()
+    return total
+
+
+def directional_derivatives(model, params, buffers, tangent, X, Y, batch_size, out):
+    """out[i] += <g_i, tangent> for every i in the pool, one forward pass per batch."""
+    n = X.shape[0]
+    for start in range(0, n, batch_size):
+        xb, yb = X[start:start + batch_size], Y[start:start + batch_size]
+
+        def f(p):
+            logits = torch.func.functional_call(model, {**p, **buffers}, (xb,))
+            return F.cross_entropy(logits, yb, reduction='none')
+
+        _, jv = torch.func.jvp(f, (params,), (tangent,))
+        out[start:start + batch_size] = jv.double()
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trajectory state
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Trajectory:
+    """
+    Per-checkpoint (params, buffers, w_k, M_k, gbar_k) plus the running
+    aggregate u_I^k. Weights stay resident: 11.2M params x 4 B x 10
+    checkpoints is under half a GB, against a disk read per iteration.
+    The fp64 vectors are the real cost, ~90 MB each; v_k = u_I^k/m -
+    gbar_k is a difference of nearly equal quantities, so fp64 is not
+    optional.
+    """
+
+    def __init__(self, model, checkpoints, use_metric, X, Y, device,
+                 batch_size, adam_eps=1e-8, logger=None, metric_scale=None):
+        self.model = model.eval()
+        self.X, self.Y = X, Y
+        self.batch_size = batch_size
+        self.order = [n for n, p in model.named_parameters() if p.requires_grad]
+        self.weights = [c.weight for c in checkpoints]
+        self.states, self.metrics, self.gbar = [], [], []
+        self.u = None
+
+        named = list(model.named_parameters())
+        pool = torch.arange(X.shape[0], device=device)
+        for c in checkpoints:
+            params, buffers = split_state(model, ref.load_weights(c.path), device)
+            self.states.append((params, buffers))
+            self.metrics.append(
+                ref.adam_metric_flat(c, named, eps=adam_eps, power=2).to(device)
+                if use_metric else None)
+            if logger:
+                logger.info(f"  checkpoint epoch {c.epoch:3d} (step {c.step}): "
+                            f"mean gradient over the pool ...")
+            self.gbar.append(
+                grad_sum(self.model, params, buffers, X, Y, pool, batch_size, self.order)
+                / X.shape[0])
+
+        self.metric_scale = 1.0
+        if use_metric:
+            # (sqrt(vhat)+eps)^-2 spans many orders of magnitude; one scale
+            # shared by every checkpoint tames it without disturbing the
+            # relative weighting, so no swap decision changes.
+            self.metric_scale = (metric_scale if metric_scale is not None
+                                 else max(float(M.mean()) for M in self.metrics))
+            self.metrics = [M / self.metric_scale for M in self.metrics]
+            if logger:
+                logger.info(f"Metric M_k = D_k^2 rescaled by 1/{self.metric_scale:.4g} "
+                            f"(global, D is in those units)")
+
+    def __len__(self):
+        return len(self.states)
+
+    def set_subset(self, index):
+        """Recompute u_I^k from scratch."""
+        self.u = [grad_sum(self.model, p, b, self.X, self.Y, index,
+                           self.batch_size, self.order)
+                  for p, b in self.states]
+
+    def aggregate(self, index):
+        """sum_{i in index} g_i^k for every checkpoint."""
+        return [grad_sum(self.model, p, b, self.X, self.Y, index,
+                         self.batch_size, self.order)
+                for p, b in self.states]
+
+    def residuals(self, m):
+        """v_k = u_I^k/m - gbar_k, one at a time: each is ~90 MB in float64."""
+        for u, g in zip(self.u, self.gbar):
+            yield u / m - g
+
+    def D(self, m):
+        """sum_k w_k ||u_I^k/m - gbar_k||^2_{M_k} >= 0."""
+        return sum(w * d_alpha.weighted_sq_norm(v, M)
+                   for w, v, M in zip(self.weights, self.residuals(m), self.metrics))
+
+    def exact_change(self, deltas, m):
+        """
+        Delta = sum_k w_k [ (2/m)<v_k, M_k u_delta^k> + (1/m^2)||u_delta^k||^2_M ].
+
+        Algebraically delta'h + (1/m^2) delta'P delta, but evaluated
+        entirely in float64 from the aggregates rather than by summing
+        entries of the float32 h. Near convergence the linear and
+        curvature terms very nearly cancel, and that difference is
+        exactly what decides acceptance.
+        """
+        total = 0.0
+        for w, M, v, du in zip(self.weights, self.metrics, self.residuals(m), deltas):
+            Mdu = du if M is None else M * du
+            total += w * ((2.0 / m) * float((v * Mdu).sum())
+                          + float((du * Mdu).sum()) / m ** 2)
+        return total
+
+    def gradient(self, m):
+        """
+        h_i = (2/m) sum_k w_k <g_i^k, M_k v_k>, one JVP sweep per checkpoint.
+
+        The tangent is normalised before the sweep and the scale restored
+        after: v_k is a residual that gets small as the subset improves,
+        and the forward pass runs in the model's float32.
+        """
+        h = torch.zeros(self.X.shape[0], dtype=torch.float64, device=self.X.device)
+        scratch = torch.empty_like(h)
+        for (params, buffers), w, M, v in zip(self.states, self.weights,
+                                              self.metrics, self.residuals(m)):
+            t = v if M is None else M * v
+            norm = float(t.norm())
+            if norm == 0.0:
+                continue
+            tangent = unflatten((t / norm).to(next(iter(params.values())).dtype),
+                                params, self.order)
+            directional_derivatives(self.model, params, buffers, tangent,
+                                    self.X, self.Y, self.batch_size, scratch)
+            h += (2.0 / m) * w * norm * scratch
+        return h
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Algorithm 3
+# ─────────────────────────────────────────────────────────────────────────────
+
+def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
+                                candidates=1, refresh_every=0, logger=None, seed=None):
+    """
+    Rank exchanges by h, then accept only on a negative *exact* change.
+
+    swaps_per_sweep > 1 exchanges the s worst-ranked selected points for
+    the s best-ranked unselected ones in a single step. The gradient
+    ranking is only a linearisation, so a block can fail where each of
+    its swaps would have succeeded; the block size is halved until the
+    exact change is negative.
+
+    --candidates c relaxes Algorithm 3's stopping rule, which declares
+    convergence as soon as its single top-ranked pair is rejected even
+    though a lower-ranked pair may still improve D. With c > 1 the top c
+    pairs are tested before giving up. This is a partial fix: it is not
+    the exact best-swap search, because the curvature term
+    (1/m^2)||g_j - g_i||^2_M is not available per pair without per-sample
+    gradients. train_kl_selection.py --rule best does the exact version
+    on the last-layer kernel.
+
+    Returns the stopping reason alongside the subset, since "converged"
+    and "ran out of sweeps" mean very different things here.
+    """
+    n = traj.X.shape[0]
+    g = torch.Generator()
+    if seed is not None:
+        g.manual_seed(seed)
+    index = torch.randperm(n, generator=g)[:m].to(traj.X.device).sort().values
+    selected = torch.zeros(n, dtype=torch.bool, device=traj.X.device)
+    selected[index] = True
+    traj.set_subset(index)
+
+    history = [{"iteration": 0, "D": traj.D(m), "swaps": 0}]
+    swaps, t, gamma = 0, 0, float('nan')
+    reason = 'max_iters'
+    best_rejected = None
+    cand = max(1, min(candidates, m, n - m))
+
+    def attempt(drop, add):
+        """Exact float64 change for this exchange; applies it if negative."""
+        deltas = [a - d for a, d in zip(traj.aggregate(add), traj.aggregate(drop))]
+        change = traj.exact_change(deltas, m)
+        if change < 0:
+            for u, du in zip(traj.u, deltas):
+                u += du
+            selected[drop] = False
+            selected[add] = True
+        return change
+
+    for t in range(1, max_iters + 1):
+        h = traj.gradient(m)
+        sel_idx = torch.where(selected)[0]
+        uns_idx = torch.where(~selected)[0]
+        drop_order = sel_idx[torch.argsort(h[sel_idx], descending=True)]
+        add_order = uns_idx[torch.argsort(h[uns_idx])]
+
+        # gamma_t: the best-ranked pair's linearised gain. Non-positive
+        # means no exchange even looks like a descent direction, which is
+        # Algorithm 3's optimality test on the linear term alone.
+        gamma = float(h[drop_order[0]] - h[add_order[0]])
+        if gamma <= 0:
+            reason = 'gamma<=0'
+            break
+
+        accepted, change, best_rejected = False, None, None
+
+        # Block exchange first: it is the only way to amortise the sweep
+        # over more than one swap. Halve on failure — the ranking is a
+        # linearisation, so a block can fail where its members succeed.
+        block = min(swaps_per_sweep, m, n - m)
+        while block > 1 and not accepted:
+            change = attempt(drop_order[:block], add_order[:block])
+            if change < 0:
+                swaps += block
+                accepted = True
+            else:
+                best_rejected = (change if best_rejected is None
+                                 else min(best_rejected, change))
+                block //= 2
+
+        # Then single pairs in increasing linear term. Algorithm 3 stops
+        # at the first rejection (candidates=1); c > 1 keeps looking,
+        # since a rejected top pair does not mean every pair is bad.
+        if not accepted:
+            pairs = common.ranked_pairs(
+                drop_order[:cand].cpu().numpy(), h[drop_order[:cand]].cpu().numpy(),
+                add_order[:cand].cpu().numpy(), h[add_order[:cand]].cpu().numpy())
+            for c, (_, i, j) in enumerate(pairs):
+                if c >= cand:
+                    break
+                change = attempt(torch.tensor([i], device=h.device),
+                                 torch.tensor([j], device=h.device))
+                if change < 0:
+                    swaps += 1
+                    accepted = True
+                    break
+                best_rejected = (change if best_rejected is None
+                                 else min(best_rejected, change))
+
+        if not accepted:
+            reason = (f'top-{cand} candidates all rejected' if cand > 1
+                      else 'top-ranked candidate rejected (Algorithm 3 stopping rule)')
+            break
+
+        if refresh_every and t % refresh_every == 0:
+            traj.set_subset(torch.where(selected)[0])
+
+        history.append({"iteration": t, "D": traj.D(m), "swaps": swaps,
+                        "gamma": gamma, "change": change})
+        if logger and (t % 10 == 0 or t == 1):
+            logger.info(f"sweep {t}: D={history[-1]['D']:.6e}  swaps={swaps}  "
+                        f"gamma={gamma:.3e}  change={change:.3e}")
+
+    index = torch.where(selected)[0]
+    # u_I drifts as it accumulates differences; settle the reported value.
+    traj.set_subset(index)
+    diag = {"reason": reason, "sweeps": t, "swaps": swaps, "final_gamma": gamma,
+            "best_rejected_change": best_rejected, "D": traj.D(m)}
+    history.append({"iteration": t, "final": True, **diag})
+    if logger:
+        logger.info(f"stopped after {t} sweeps: {reason}. final gamma={gamma:.3e}, "
+                    f"best rejected exact change="
+                    + ("n/a" if best_rejected is None else f"{best_rejected:.3e}"))
+        if reason == 'max_iters':
+            logger.warning("--max_iters reached, so the search had not settled; "
+                           "the subset is the best found, not a local optimum.")
+    return index.cpu(), history, diag
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--fraction',       default=0.3,         type=float)
+    p.add_argument('--seed', '-seed',  default=42,          type=int)
+    p.add_argument('--checkpoint_dir', required=True,       type=str)
+    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--data_dir',       required=True,       type=str)
+    p.add_argument('--num_checkpoints', default=10,         type=int,
+                   help='0 = every checkpoint found.')
+    p.add_argument('--checkpoint_selection', default='spread', choices=['spread', 'prefix'],
+                   help="'spread' spaces the K checkpoints over the whole run.")
+    p.add_argument('--checkpoint_epochs', default=None, type=int, nargs='+',
+                   help='Explicit checkpoint epochs; overrides the two options above.')
+    p.add_argument('--optimizer',      default='uniform', choices=list(ref.OPTIMIZERS),
+                   help='Objective weighting (w_k, M_k). See reference_trajectory.py. '
+                        'NOTE the default optimises neither Adam weights nor its '
+                        'preconditioner; it is kept only to reproduce earlier runs.')
+    p.add_argument('--metric',         default='auto', choices=list(ref.METRICS),
+                   help='Override M_k independently of the step weight. Needed for a '
+                        'short prefix trajectory, where eta is flat and --optimizer '
+                        'uniform --metric adam is the only way to get equal checkpoint '
+                        'weights together with the Adam preconditioner.')
+    p.add_argument('--momentum_response', default='persistent',
+                   choices=list(ref.MOMENTUM_RESPONSES),
+                   help="a_s in w_k. 'persistent' (a_s = 1) is the exact response to a "
+                        'discrepancy that lasts, which is what a subset produces; '
+                        "'isolated' is (1-beta1)/(1-beta1^s).")
+    p.add_argument('--ref_lr',         default=0.01,        type=float,
+                   help='Base LR of the reference run, for rebuilding eta_s on a legacy dir.')
+    p.add_argument('--adam_eps',       default=1e-8,        type=float)
+    p.add_argument('--beta1',          default=0.9,         type=float)
+    p.add_argument('--beta2',          default=0.999,       type=float)
+    p.add_argument('--max_iters',      default=200,         type=int,
+                   help='Maximum sweeps. Each sweep is one forward pass over the pool '
+                        'per checkpoint (~1760 batches at CIFAR-100 scale with K=10), '
+                        'so this is the wall-clock knob — and 200 may well stop before '
+                        'the search settles. The stopping reason is logged and saved.')
+    p.add_argument('--swaps_per_sweep', default=1,          type=int,
+                   help='Exchanges attempted per gradient sweep. 1 is Algorithm 3 '
+                        'exactly; larger values amortise the sweep and back off '
+                        'automatically when the block fails its exact test.')
+    p.add_argument('--candidates',     default=1,           type=int,
+                   help='Single pairs tested per sweep before declaring convergence. '
+                        "1 is Algorithm 3's stopping rule, which gives up as soon as its "
+                        'top-ranked pair is rejected even though a lower-ranked one may '
+                        'still improve D.')
+    p.add_argument('--refresh_every',  default=0,           type=int,
+                   help='Recompute u_I from scratch every N accepted sweeps (0 = never).')
+    p.add_argument('--batch_size',     default=128,         type=int)
+    p.add_argument('--score_batch_size', default=256,       type=int,
+                   help='Batch size for the JVP and aggregate-gradient sweeps.')
+    p.add_argument('--lr',             default=0.01,        type=float,
+                   help='Learning rate for retraining')
+    p.add_argument('--retrain_optimizer', default=None, choices=['sgd', 'adam', 'adamw'],
+                   help='Default: follow --optimizer.')
+    p.add_argument('--init_ckpt',      default=None,        type=str,
+                   help='Shared retraining initialisation. Created on first use, then '
+                        'reused, so two selectors are compared from the same weights.')
+    p.add_argument('--num_workers',    default=4,           type=int)
+    p.add_argument('--download',       action='store_true', default=False)
+    p.add_argument('--scoring_transform', default='test', choices=['train', 'test'],
+                   help="View the pool is scored through. Default 'test' (clean) so that "
+                        'this and the last-layer selector score identical inputs.')
+    p.add_argument('--selection_only', action='store_true', default=False)
+    args = p.parse_args()
+
+    set_seed(args.seed)
+    use_metric = ref.resolve_metric(args.optimizer, args.metric)
+    if args.retrain_optimizer is None:
+        args.retrain_optimizer = 'adam' if use_metric else 'sgd'
+
+    cfg         = get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    NUM_CLASSES = cfg['num_classes']
+    NUM_EPOCHS  = cfg['num_epochs']
+    device      = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    n_val   = int(0.1 * len(cfg['full_train']))
+    n_train = len(cfg['full_train']) - n_val
+    budget  = int(args.fraction * n_train)
+
+    if not os.path.isdir(args.checkpoint_dir):
+        raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
+    checkpoints, manifest, ckpt_description = ref.resolve(
+        args.checkpoint_dir, optimizer=args.optimizer,
+        num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
+        epochs=args.checkpoint_epochs, n_train=n_train, batch_size=args.batch_size,
+        base_lr=args.ref_lr, num_epochs=NUM_EPOCHS, beta1=args.beta1,
+        momentum=args.momentum_response, metric=args.metric)
+    K = len(checkpoints)
+
+    scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
+    base_dir = f"{scratch_path}/gradmatch_swap/{args.dataset}/{budget}/seed_{args.seed}"
+    os.makedirs(base_dir, exist_ok=True)
+
+    obj_tag = '' if args.optimizer == 'uniform' else f"_{args.optimizer}"
+    file_prefix = f"kl_faithful_full{obj_tag}_{budget}_K{K}"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(os.path.join(base_dir, f"{file_prefix}_training.log")),
+                  logging.StreamHandler()],
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Dataset={args.dataset}  budget={budget}/{n_train}  seed={args.seed}  "
+                f"device={device}")
+    logger.info(f"Trajectory: {ckpt_description}"
+                + ("" if manifest else "  (legacy dir, eta_s reconstructed from the "
+                                        "cosine schedule)"))
+    logger.info("\n" + ref.describe(checkpoints))
+    logger.info(f"metric={'D_k^2' if use_metric else 'I'}  "
+                f"scoring_transform={args.scoring_transform}  "
+                f"retrain_optimizer={args.retrain_optimizer}  "
+                f"init_ckpt={args.init_ckpt}")
+    if args.optimizer == 'uniform' and not use_metric:
+        logger.warning("--optimizer uniform --metric none: w_k = 1 and M_k = I, so this "
+                       "run uses neither the learning-rate weighting nor the Adam "
+                       "preconditioner. Pass --optimizer sgd or --metric adam.")
+    last_epoch = checkpoints[-1].epoch
+    if last_epoch < 0.25 * NUM_EPOCHS:
+        logger.warning(
+            f"Trajectory stops at epoch {last_epoch} of {NUM_EPOCHS}. The objective "
+            f"describes only that prefix and says nothing about the rest of training; "
+            f"the subset is chosen to match early-training gradients and is being "
+            f"retrained for the full {NUM_EPOCHS}.")
+
+    # Same keys as common.get_save_paths, so common.finish can be reused,
+    # but laid out like train_kl_selection.py's so the two Algorithm 3
+    # variants land side by side and aggregate_selection_comparison.py
+    # discovers them the same way.
+    paths = dict(base_dir=base_dir,
+                 model=os.path.join(base_dir, f"{file_prefix}_model.pth"),
+                 indices=os.path.join(base_dir, f"{file_prefix}_indices.pt"),
+                 metrics=os.path.join(base_dir, f"{file_prefix}_metrics.json"),
+                 timing=os.path.join(base_dir, f"{file_prefix}_timing.json"),
+                 objective=os.path.join(base_dir, f"{file_prefix}_objective.json"))
+
+    trainset, _ = random_split(
+        cfg['full_train'], [n_train, n_val],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    scoring_set = common.scoring_subset(cfg, trainset, args.scoring_transform)
+
+    model = common.build_model(cfg, NUM_CLASSES, device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    # Every sweep touches the whole pool many times over, so it is
+    # materialised on the device once rather than reloaded per iteration.
+    X, Y = d_alpha.materialise(scoring_set, device, batch_size=args.batch_size,
+                               num_workers=args.num_workers)
+    logger.info(f"Pool on device: {tuple(X.shape)}  ({X.numel() * 4 / 1e9:.2f} GB).  "
+                f"{n_params/1e6:.1f}M trainable parameters, "
+                f"{3 * K * n_params * 8 / 1e9:.2f} GB of float64 trajectory state.")
+
+    timer = common.SelectionTimer(device)
+    with timer.phase('scoring'):
+        traj = Trajectory(model, checkpoints, use_metric, X, Y, device,
+                          args.score_batch_size, adam_eps=args.adam_eps, logger=logger)
+
+    logger.info(f"Running gradient-ranked single-swap descent over all parameters "
+                f"(swaps_per_sweep={args.swaps_per_sweep}, "
+                f"candidates={args.candidates}) ...")
+    with timer.phase('selection'):
+        selected_indices, history, diag = gradient_ranked_single_swap(
+            traj, budget, max_iters=args.max_iters,
+            swaps_per_sweep=args.swaps_per_sweep, candidates=args.candidates,
+            refresh_every=args.refresh_every, logger=logger, seed=args.seed)
+    logger.info(f"{diag['sweeps']} sweeps, {diag['swaps']} accepted swaps, "
+                f"{len(selected_indices)} samples selected. "
+                f"D: {history[0]['D']:.6e} -> {diag['D']:.6e}")
+
+    common.save_timing(paths['timing'], timer, logger, method='kl_faithful_full',
+                       reference_epochs_used=[c.epoch for c in checkpoints],
+                       swap_iterations=diag['sweeps'], accepted_swaps=diag['swaps'],
+                       stopping_reason=diag['reason'],
+                       final_gamma=diag['final_gamma'],
+                       best_rejected_change=diag['best_rejected_change'],
+                       final_D=diag['D'], metric_scale=traj.metric_scale,
+                       swaps_per_sweep=args.swaps_per_sweep,
+                       candidates=args.candidates,
+                       objective_optimizer=args.optimizer,
+                       objective_metric='D_k^2' if use_metric else 'I',
+                       momentum_response=args.momentum_response,
+                       scoring_transform=args.scoring_transform,
+                       checkpoint_selection=args.checkpoint_selection,
+                       checkpoint_steps=[c.step for c in checkpoints],
+                       checkpoint_weights=[c.weight for c in checkpoints],
+                       num_checkpoints_used=K)
+    with open(paths['objective'], 'w') as fh:
+        json.dump(history, fh, indent=4)
+
+    # The pool, the float64 trajectory state and K sets of weights are all
+    # still resident; retraining needs none of them.
+    del traj
+    del X, Y
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+
+    common.finish(cfg, trainset, selected_indices, device, args, logger, paths)
+
+
+if __name__ == '__main__':
+    main()
