@@ -2,7 +2,7 @@
 #SBATCH --job-name=selection_baselines
 #SBATCH --output=logs/baselines_%A_%a.txt
 #SBATCH --error=logs/baselines_%A_%a.txt
-#SBATCH --array=0-139                # 7 methods × 4 fractions × 5 seeds
+#SBATCH --array=0-839                # 6 (dataset,arch) combos × 7 methods × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # keep identical to alg3.sh: timings are only comparable on the same GPU
 #SBATCH --time=15:00:00
@@ -18,7 +18,8 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters (identical to alg3.sh) ───────────────────────
-DATASET="${DATASET_OVERRIDE:-cifar100}"
+DATASETS=(cifar10 cifar100)
+ARCHS=(resnet18 vgg16 inception)
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 BATCH_SIZE=128
@@ -32,10 +33,22 @@ SCORING_TRANSFORM="${SCORING_TRANSFORM:-train}"   # must match what train_kl_sel
 read -r -a METHODS <<< "${METHODS:-random herding moderate el2n moso graphcut facility_location}"
 
 N_FS=$(( ${#FRACTIONS[@]} * ${#SEEDS[@]} ))
-METHOD=${METHODS[$(( SLURM_ARRAY_TASK_ID / N_FS ))]}
-REM=$(( SLURM_ARRAY_TASK_ID % N_FS ))
+N_METHOD=$(( ${#METHODS[@]} ))
+N_COMBOS=$(( ${#DATASETS[@]} * ${#ARCHS[@]} ))
+TASKS_PER_COMBO=$(( N_METHOD * N_FS ))
+
+IDX="${SLURM_ARRAY_TASK_ID:-0}"
+COMBO_IDX=$(( IDX / TASKS_PER_COMBO ))
+COMBO_REM=$(( IDX % TASKS_PER_COMBO ))
+METHOD=${METHODS[$(( COMBO_REM / N_FS ))]}
+REM=$(( COMBO_REM % N_FS ))
 FRACTION=${FRACTIONS[$(( REM / ${#SEEDS[@]} ))]}
 SEED=${SEEDS[$(( REM % ${#SEEDS[@]} ))]}
+
+DATASET="${DATASETS[$(( COMBO_IDX / ${#ARCHS[@]} ))]}"
+ARCH="${ARCHS[$(( COMBO_IDX % ${#ARCHS[@]} ))]}"
+if [ -n "${DATASET_OVERRIDE:-}" ]; then DATASET="$DATASET_OVERRIDE"; fi
+if [ -n "${ARCH_OVERRIDE:-}" ]; then ARCH="$ARCH_OVERRIDE"; fi
 
 # MoSo full-network per-sample gradients are affordable on CIFAR-100 but not
 # on ImageNet; fall back to the exact last-layer form there.
@@ -63,7 +76,7 @@ esac
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints"
+CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCH}/checkpoints"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 
@@ -71,12 +84,13 @@ source "${SLURM_SUBMIT_DIR}/stage_dataset.sh"
 stage_dataset "$DATASET" "$LOCAL_DATA"
 
 echo "=================================================="
-echo " Task $SLURM_ARRAY_TASK_ID | method=$METHOD | dataset=$DATASET | fraction=$FRACTION | seed=$SEED"
+echo " Task $SLURM_ARRAY_TASK_ID | method=$METHOD | dataset=$DATASET | arch=$ARCH | fraction=$FRACTION | seed=$SEED"
 echo " Command: ${CMD[*]}"
 echo "=================================================="
 
 srun python "${CMD[@]}" \
     --dataset "$DATASET" \
+    --arch "$ARCH" \
     --fraction "$FRACTION" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \

@@ -2,7 +2,7 @@
 #SBATCH --job-name=kl_selection
 #SBATCH --output=logs/kl_select_lrw_%A_%a.txt
 #SBATCH --error=logs/kl_select_lrw_%A_%a.txt
-#SBATCH --array=0-19                 # 20 tasks = 4 fractions x 5 seeds (one dataset per submission)
+#SBATCH --array=0-119                # 6 (dataset,arch) combos × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
 #SBATCH --time=15:00:00
@@ -20,7 +20,8 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
-DATASET="cifar100"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
+DATASETS=(cifar10 cifar100)
+ARCHS=(resnet18 vgg16 inception)
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 
@@ -38,22 +39,23 @@ LR_WEIGHTING=1       # 1 = weight checkpoints by eta_k (files get an "_lrw" suff
                      # 0 = previous unweighted objective (override with LR_WEIGHTING=0 sbatch ...)
 LR_WEIGHTING="${LR_WEIGHTING_OVERRIDE:-$LR_WEIGHTING}"
 
-# ── Map flat task ID → (fraction, seed) ─────────────────────────────
-# Array is 0-19. Divide by 5 for the fraction index, modulo 5 for the seed index.
-if [ -n "${DATASET_OVERRIDE:-}" ]; then
-    DATASET="$DATASET_OVERRIDE"
-fi
+# ── Map flat task ID → (dataset, arch, fraction, seed) ───────────────────────
+N_FS=$(( ${#FRACTIONS[@]} * ${#SEEDS[@]} ))
+IDX="${SLURM_ARRAY_TASK_ID:-0}"
+COMBO_IDX=$(( IDX / N_FS ))
+REM=$(( IDX % N_FS ))
+FRACTION=${FRACTIONS[$(( REM / ${#SEEDS[@]} ))]}
+SEED=${SEEDS[$(( REM % ${#SEEDS[@]} ))]}
+DATASET="${DATASETS[$(( COMBO_IDX / ${#ARCHS[@]} ))]}"
+ARCH="${ARCHS[$(( COMBO_IDX % ${#ARCHS[@]} ))]}"
 
-FRACTION_IDX=$(( SLURM_ARRAY_TASK_ID / 5 ))
-SEED_IDX=$(( SLURM_ARRAY_TASK_ID % 5 ))
-
-FRACTION=${FRACTIONS[$FRACTION_IDX]}
-SEED=${SEEDS[$SEED_IDX]}
+if [ -n "${DATASET_OVERRIDE:-}" ]; then DATASET="$DATASET_OVERRIDE"; fi
+if [ -n "${ARCH_OVERRIDE:-}" ]; then ARCH="$ARCH_OVERRIDE"; fi
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 # Override with CHECKPOINT_DIR=... to point at e.g. .../${DATASET}/${ARCH}/checkpoints
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCH}/checkpoints}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 
@@ -75,6 +77,7 @@ stage_dataset "$DATASET" "$LOCAL_DATA"
 echo "=================================================="
 echo " SLURM Array Task ID : $SLURM_ARRAY_TASK_ID"
 echo " Dataset             : $DATASET"
+echo " Architecture        : $ARCH"
 echo " Fraction            : $FRACTION"
 echo " Seed                : $SEED"
 echo " Checkpoint Dir      : $CHECKPOINT_DIR"
@@ -91,6 +94,7 @@ echo "--------------------------------------------------"
 
 srun python train_kl_selection.py \
     --dataset "$DATASET" \
+    --arch "$ARCH" \
     --fraction "$FRACTION" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \

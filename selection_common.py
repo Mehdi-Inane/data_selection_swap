@@ -42,12 +42,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.datasets as datasets
+import torchvision.models as tvm
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset, random_split
+from torchvision.models.googlenet import BasicConv2d
 
-from cords.utils.models import ResNet18
-
-FEAT_DIM = 512  # ResNet18 penultimate layer width, all datasets below
+ARCHS = ["resnet18", "vgg16", "inception"]
+DATA_MARKERS = {
+    "cifar10": ["cifar-10-batches-py"],
+    "cifar100": ["cifar-100-python"],
+    "imagenet": ["train", "val"],
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,10 +70,41 @@ def set_seed(seed=42):
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset configuration  (identical to train_kl_selection.py)
 # ─────────────────────────────────────────────────────────────────────────────
+def resolve_data_root(dataset: str, data_dir: str, download: bool = False) -> str:
+    base = data_dir or os.environ.get("SLURM_TMPDIR")
+    if base is None:
+        raise ValueError("Pass --data_dir or run inside a SLURM job with $SLURM_TMPDIR.")
+
+    candidates = [base] + [os.path.join(base, sub) for sub in (
+        f"{dataset}_data", dataset, "data", f"{dataset}-data",
+        *(("ILSVRC", "ILSVRC/Data/CLS-LOC") if dataset == "imagenet" else ()),
+    )]
+    for root in candidates:
+        if all(os.path.isdir(os.path.join(root, m)) for m in DATA_MARKERS[dataset]):
+            return root
+
+    if download and dataset in ("cifar10", "cifar100"):
+        root = os.path.join(base, f"{dataset}_data")
+        os.makedirs(root, exist_ok=True)
+        return root
+
+    raise FileNotFoundError(
+        f"Could not find '{dataset}' (looking for {DATA_MARKERS[dataset]}). Tried:\n  "
+        + "\n  ".join(candidates)
+    )
+
+
 def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> dict:
     """Return per-dataset hyper-params, transforms, and dataset objects."""
-    if dataset == 'cifar100':
-        mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
+    root = resolve_data_root(dataset, data_dir, download)
+
+    if dataset in ('cifar10', 'cifar100'):
+        if dataset == 'cifar10':
+            cls, n_cls = datasets.CIFAR10, 10
+            mean, std = (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)
+        else:
+            cls, n_cls = datasets.CIFAR100, 100
+            mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
         tf_tr = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -76,12 +112,12 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
         ])
         tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
         return dict(
-            num_classes=100, num_epochs=300, cifar_style=True,
-            full_train=datasets.CIFAR100(root=data_dir, train=True,  download=download, transform=tf_tr),
-            testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
+            root=root, num_classes=n_cls, num_epochs=300, cifar_style=True,
+            full_train=cls(root=root, train=True, download=download, transform=tf_tr),
+            testset=cls(root=root, train=False, download=download, transform=tf_te),
         )
 
-    elif dataset == 'imagenet':
+    if dataset == 'imagenet':
         mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
         tf_tr = transforms.Compose([
             transforms.RandomResizedCrop(224),
@@ -93,23 +129,38 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
             transforms.ToTensor(), transforms.Normalize(mean, std),
         ])
         return dict(
-            num_classes=1000, num_epochs=350, cifar_style=False,
-            full_train=datasets.ImageFolder(os.path.join(data_dir, 'train'), transform=tf_tr),
-            testset   =datasets.ImageFolder(os.path.join(data_dir, 'val'),   transform=tf_te),
+            root=root, num_classes=1000, num_epochs=350, cifar_style=False,
+            full_train=datasets.ImageFolder(os.path.join(root, 'train'), transform=tf_tr),
+            testset=datasets.ImageFolder(os.path.join(root, 'val'), transform=tf_te),
         )
 
-    else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'cifar100' or 'imagenet'.")
+    raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'cifar10', 'cifar100', or 'imagenet'.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model  (identical CIFAR-stem swap as train_kl_selection.py)
 # ─────────────────────────────────────────────────────────────────────────────
-def build_model(cfg: dict, num_classes: int, device: str) -> nn.Module:
-    model = ResNet18(num_classes=num_classes)
-    if cfg['cifar_style']:
-        model.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        model.maxpool = nn.Identity()
+def build_model(cfg: dict, num_classes: int, device: str, arch: str = "resnet18") -> nn.Module:
+    if arch == "resnet18":
+        model = tvm.resnet18(num_classes=num_classes)
+        if cfg['cifar_style']:
+            model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            model.maxpool = nn.Identity()
+    elif arch == "vgg16":
+        model = tvm.vgg16_bn(num_classes=num_classes)
+        if cfg['cifar_style']:
+            model.avgpool = nn.AdaptiveAvgPool2d(1)
+            model.classifier = nn.Sequential(
+                nn.Linear(512, 512), nn.ReLU(True), nn.Dropout(0.5),
+                nn.Linear(512, num_classes),
+            )
+    elif arch == "inception":
+        model = tvm.googlenet(aux_logits=False, init_weights=True, num_classes=num_classes)
+        if cfg['cifar_style']:
+            model.conv1 = BasicConv2d(3, 64, kernel_size=3, stride=1, padding=1)
+            model.maxpool1 = nn.Identity()
+    else:
+        raise ValueError(f"Unknown arch: {arch!r}. Choose from {ARCHS}.")
     return model.to(device)
 
 
@@ -178,6 +229,21 @@ def reference_epochs_used(ckpt_paths) -> int:
     return max(epochs, default=0)
 
 
+def unwrap_checkpoint_state(state):
+    """Support plain state_dict and full train_full_data.py checkpoints."""
+    if isinstance(state, dict):
+        if "model" in state:
+            return state["model"]
+        if "state_dict" in state:
+            return state["state_dict"]
+    return state
+
+
+def load_model_checkpoint(model: nn.Module, ckpt_path: str, device: str):
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(unwrap_checkpoint_state(state))
+
+
 def resolve_embedding_checkpoint(checkpoint_dir: str, override: str = None) -> str:
     """
     One-shot methods (Herding / Moderate Coreset / GraphCut / Facility
@@ -212,10 +278,12 @@ def extract_probs_features_targets(model: nn.Module, dataloader, device: str):
     model.eval()
     feats = {}
 
+    classifier = get_classifier_layer(model)
+
     def _hook(_, inp, __):
         feats['phi'] = inp[0]
 
-    handle = model.linear.register_forward_hook(_hook)
+    handle = classifier.register_forward_hook(_hook)
 
     probs_buf, phi_buf, targets_buf = [], [], []
     for inputs, targets in dataloader:
@@ -227,6 +295,22 @@ def extract_probs_features_targets(model: nn.Module, dataloader, device: str):
 
     handle.remove()
     return torch.cat(probs_buf), torch.cat(phi_buf), torch.cat(targets_buf)
+
+
+def get_classifier_layer(model: nn.Module) -> nn.Linear:
+    if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
+        return model.fc
+    if hasattr(model, "linear") and isinstance(model.linear, nn.Linear):
+        return model.linear
+    if hasattr(model, "classifier"):
+        clf = model.classifier
+        if isinstance(clf, nn.Linear):
+            return clf
+        if isinstance(clf, nn.Sequential):
+            for layer in reversed(clf):
+                if isinstance(layer, nn.Linear):
+                    return layer
+    raise ValueError(f"Could not locate final linear classifier layer for {type(model).__name__}.")
 
 
 def logit_grads(probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -255,7 +339,7 @@ def build_class_kernels(kind: str, model: nn.Module, eval_loader, checkpoint_dir
 
     kernels = class_idx = None
     for ckpt in ckpts:
-        model.load_state_dict(torch.load(ckpt, map_location=device))
+        load_model_checkpoint(model, ckpt, device)
         probs, phi, targets = extract_probs_features_targets(model, eval_loader, device)
         if class_idx is None:
             class_idx = [torch.where(targets == c)[0] for c in range(num_classes)]
@@ -379,9 +463,9 @@ def save_timing(path: str, timer: SelectionTimer, logger, **extra):
 # Save-path / logging convention (one line change — method name — vs.
 # train_kl_selection.py's own base_dir / logging setup)
 # ─────────────────────────────────────────────────────────────────────────────
-def get_save_paths(method: str, dataset: str, budget: int, seed: int) -> dict:
+def get_save_paths(method: str, dataset: str, arch: str, budget: int, seed: int) -> dict:
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir = f"{scratch_path}/data_selection_baselines/{method}/{dataset}/{budget}/seed_{seed}"
+    base_dir = f"{scratch_path}/data_selection_baselines/{method}/{dataset}/{arch}/{budget}/seed_{seed}"
     os.makedirs(base_dir, exist_ok=True)
     return dict(
         base_dir=base_dir,
@@ -414,7 +498,8 @@ def base_argparser(description: str):
     p.add_argument('--seed', '-seed',  default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str,
                    help='Same trajectory directory used for train_kl_selection.py')
-    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset',        default='cifar100',  choices=['cifar10', 'cifar100', 'imagenet'])
+    p.add_argument('--arch',           default='resnet18',  choices=ARCHS)
     p.add_argument('--data_dir',       required=True,       type=str)
     p.add_argument('--batch_size',     default=128,         type=int)
     p.add_argument('--lr',             default=0.01,        type=float,
@@ -445,7 +530,7 @@ def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, pat
     testloader = DataLoader(cfg['testset'], batch_size=args.batch_size, shuffle=False,
                              pin_memory=True, num_workers=args.num_workers)
 
-    model = build_model(cfg, cfg['num_classes'], device)
+    model = build_model(cfg, cfg['num_classes'], device, args.arch)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9,
                            weight_decay=5e-4, nesterov=True)

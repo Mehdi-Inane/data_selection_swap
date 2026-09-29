@@ -50,7 +50,7 @@ def el2n_select(scores: torch.Tensor, budget: int, offset: int = 0) -> torch.Ten
 def train_probe(cfg, trainset, epochs, seed, device, args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    model = common.build_model(cfg, cfg['num_classes'], device)
+    model = common.build_model(cfg, cfg['num_classes'], device, args.arch)
     loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True,
                         pin_memory=True, num_workers=args.num_workers,
                         generator=torch.Generator().manual_seed(seed))
@@ -94,9 +94,9 @@ def main():
     method = 'el2n' if args.source == 'probes' else 'el2n_trajectory'
     if args.offset:
         method += f'_offset{args.offset}'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(method, args.dataset, args.arch, budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  "
                 f"source={args.source}  score_epoch={args.score_epoch}  device={device}")
 
     timer = common.SelectionTimer(device)
@@ -107,9 +107,9 @@ def main():
         ckpt = os.path.join(args.checkpoint_dir, f"checkpoint_{args.score_epoch:03d}.pth")
         if not os.path.isfile(ckpt):
             raise ValueError(f"No trajectory checkpoint at epoch {args.score_epoch}: {ckpt}")
-        ref_model = common.build_model(cfg, NUM_CLASSES, device)
+        ref_model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
         with timer.phase('scoring'):
-            ref_model.load_state_dict(torch.load(ckpt, map_location=device))
+            common.load_model_checkpoint(ref_model, ckpt, device)
             probs, _, targets = common.extract_probs_features_targets(ref_model, eval_loader, device)
             scores = el2n_scores(probs, targets)
         reference_epochs = args.score_epoch

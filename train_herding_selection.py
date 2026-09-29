@@ -88,13 +88,13 @@ def main():
     budget = int(args.fraction * n_train)
 
     method = 'herding' if args.kernel == 'features' else f'herding_{args.kernel}'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(method, args.dataset, args.arch, budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  "
                 f"kernel={args.kernel}  device={device}")
 
     timer = common.SelectionTimer(device)
-    ref_model = common.build_model(cfg, NUM_CLASSES, device)
+    ref_model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
 
     # ── 2. Reference embedding → per-class kernels ───────────────────────────
     with timer.phase('scoring'):

@@ -66,18 +66,18 @@ def main():
         cfg, args.seed, args.batch_size, args.num_workers, args.scoring_transform)
     budget = int(args.fraction * n_train)
 
-    paths = common.get_save_paths('moderate', args.dataset, budget, args.seed)
+    paths = common.get_save_paths('moderate', args.dataset, args.arch, budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  device={device}")
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  device={device}")
 
     timer = common.SelectionTimer(device)
 
     # ── 2. Reference embedding ───────────────────────────────────────────────
     ckpt = common.resolve_embedding_checkpoint(args.checkpoint_dir, args.embedding_checkpoint)
     logger.info(f"Embedding with reference checkpoint: {ckpt}")
-    ref_model = common.build_model(cfg, NUM_CLASSES, device)
+    ref_model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
     with timer.phase('scoring'):
-        ref_model.load_state_dict(torch.load(ckpt, map_location=device))
+        common.load_model_checkpoint(ref_model, ckpt, device)
         _, phi, targets = common.extract_probs_features_targets(ref_model, eval_loader, device)
 
     # ── 3. Moderate selection ────────────────────────────────────────────────

@@ -178,9 +178,9 @@ def main():
     method = 'moso' if args.source == 'surrogates' else 'moso_trajectory'
     if args.grad_space == 'last_layer':
         method += '_lastlayer'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(method, args.dataset, args.arch, budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  "
                 f"source={args.source}  grad_space={args.grad_space}  device={device}")
 
     timer = common.SelectionTimer(device)
@@ -192,11 +192,11 @@ def main():
         chosen = evenly_spaced_checkpoints(common.list_checkpoints(args.checkpoint_dir),
                                            args.samples, args.max_epoch)
         logger.info(f"Scoring at trajectory epochs {[e for e, _ in chosen]}")
-        model = common.build_model(cfg, NUM_CLASSES, device)
+        model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
         for epoch, ckpt in chosen:
             lr = common.cosine_lr(args.trajectory_lr, epoch, cfg['num_epochs'])
             with timer.phase('scoring'):
-                model.load_state_dict(torch.load(ckpt, map_location=device))
+                common.load_model_checkpoint(model, ckpt, device)
                 scores += moso_step_scores(model, eval_loader, lr, device, args)
         reference_epochs = max(e for e, _ in chosen)
         extra_epochs = 0
@@ -212,7 +212,7 @@ def main():
                         f"scoring at epochs {sorted(score_epochs)}")
 
             torch.manual_seed(args.seed * 1000 + trial)
-            model = common.build_model(cfg, NUM_CLASSES, device)
+            model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
             train_loader = DataLoader(Subset(trainset, part.tolist()), batch_size=args.surrogate_bs,
                                       shuffle=True, pin_memory=True, num_workers=args.num_workers)
             score_loader = DataLoader(Subset(scoring_set, part.tolist()), batch_size=args.batch_size,

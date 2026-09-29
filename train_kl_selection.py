@@ -1,6 +1,6 @@
 """
 train_kl_selection.py
-KL-Faithful subset selection via Gradient-Ranked Single-Swap Descent (CIFAR-100 & ImageNet).
+KL-Faithful subset selection via Gradient-Ranked Single-Swap Descent.
 
 Memory reduction strategy
 ──────────────────────────
@@ -65,11 +65,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.datasets as datasets
-import torchvision.transforms as transforms
+import torch.nn.functional as F
+from torch.func import functional_call, grad, vmap
 from torch.utils.data import DataLoader, Subset, random_split
-
-from cords.utils.models import ResNet18
 
 import selection_common as common
 
@@ -121,40 +119,7 @@ def checkpoint_epoch(path: str) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> dict:
-    """Return per-dataset hyper-params, transforms, and dataset objects."""
-    if dataset == 'cifar100':
-        mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
-        tf_tr = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(), transforms.Normalize(mean, std),
-        ])
-        tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
-        return dict(
-            num_classes=100, num_epochs=300, cifar_style=True,
-            full_train=datasets.CIFAR100(root=data_dir, train=True,  download=download, transform=tf_tr),
-            testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
-        )
-
-    elif dataset == 'imagenet':
-        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225) # verified correct
-        tf_tr = transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(), transforms.Normalize(mean, std),
-        ])
-        tf_te = transforms.Compose([
-            transforms.Resize(256), transforms.CenterCrop(224),
-            transforms.ToTensor(), transforms.Normalize(mean, std),
-        ])
-        return dict(
-            num_classes=1000, num_epochs=350, cifar_style=False,
-            full_train=datasets.ImageFolder(os.path.join(data_dir, 'train'), transform=tf_tr),
-            testset   =datasets.ImageFolder(os.path.join(data_dir, 'val'),   transform=tf_te),
-        )
-
-    else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'cifar100' or 'imagenet'.")
+    return common.get_dataset_config(dataset, data_dir, download=download)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,7 +161,7 @@ def extract_factored_features(
     def _hook(_, inp, __):
         features_dict['phi'] = inp[0]
 
-    handle = model.linear.register_forward_hook(_hook)
+    handle = common.get_classifier_layer(model).register_forward_hook(_hook)
 
     with torch.no_grad():
         for inputs, targets in dataloader:
@@ -234,8 +199,7 @@ def load_trajectory_factored_features(model, dataloader, checkpoint_paths, devic
     LP_list = []
     for idx, ckpt in enumerate(checkpoint_paths):
         state = torch.load(ckpt, map_location=device)
-        if isinstance(state, dict) and 'model' in state:   # full training checkpoint
-            state = state['model']
+        state = common.unwrap_checkpoint_state(state)
         model.load_state_dict(state)
         L, Phi = extract_factored_features(model, dataloader, device, R_L=R_L, R_Phi=R_Phi)
         if etas is not None:
@@ -272,8 +236,68 @@ def _build_c_sum(LP_list, n, device):
     return c
 
 
-def compute_h(LP_list, alpha_vec, m, n, c_sum, device):
-    p0_alpha = _factored_Kv(LP_list, alpha_vec, device)
+def _full_gradient_kernel_vector(model, dataloader, checkpoint_paths, vector, device,
+                                 grad_chunk=8, etas=None, logger=None):
+    """
+    Exact K@v with full-network per-sample gradients, computed checkpoint-by-checkpoint
+    in two streaming passes (memory-safe but slow).
+    """
+    if etas is not None:
+        assert len(etas) == len(checkpoint_paths)
+
+    n = vector.numel()
+    out = torch.zeros(n, dtype=torch.float64)
+    vec = vector.squeeze().to(dtype=torch.float64)
+
+    for idx, ckpt in enumerate(checkpoint_paths):
+        if logger is not None:
+            logger.info(f"[full_gradient] K@v pass on checkpoint {idx + 1}/{len(checkpoint_paths)}: {ckpt}")
+        state = common.unwrap_checkpoint_state(torch.load(ckpt, map_location=device))
+        model.load_state_dict(state)
+        model.eval()
+
+        named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+        params = {name: p.detach() for name, p in named}
+        buffers = {name: b.detach() for name, b in model.named_buffers()}
+
+        def loss_fn(p, x, y):
+            out_logits = functional_call(model, (p, buffers), (x.unsqueeze(0),))
+            return F.cross_entropy(out_logits, y.unsqueeze(0))
+
+        per_sample_grad = vmap(grad(loss_fn), in_dims=(None, 0, 0))
+        z = {name: torch.zeros_like(p, dtype=torch.float64, device=device) for name, p in params.items()}
+
+        offset = 0
+        for inputs, targets in dataloader:
+            for x, y in zip(inputs.split(grad_chunk), targets.split(grad_chunk)):
+                b = y.numel()
+                coeff = vec[offset:offset + b].to(device)
+                g = per_sample_grad(params, x.to(device), y.to(device))
+                for name in params:
+                    shape = [b] + [1] * (g[name].dim() - 1)
+                    z[name] += (g[name].double() * coeff.view(*shape)).sum(dim=0)
+                offset += b
+
+        contrib = torch.zeros(n, dtype=torch.float64)
+        offset = 0
+        for inputs, targets in dataloader:
+            for x, y in zip(inputs.split(grad_chunk), targets.split(grad_chunk)):
+                b = y.numel()
+                g = per_sample_grad(params, x.to(device), y.to(device))
+                dot = torch.zeros(b, dtype=torch.float64, device=device)
+                for name in params:
+                    dot += g[name].flatten(1).double() @ z[name].flatten()
+                contrib[offset:offset + b] = dot.cpu()
+                offset += b
+
+        eta = etas[idx] if etas is not None else 1.0
+        out += float(eta) * contrib
+
+    return out.view(n, 1).to(device)
+
+
+def compute_h(apply_kernel, alpha_vec, m, n, c_sum):
+    p0_alpha = apply_kernel(alpha_vec)
     return (2.0 / m ** 2) * p0_alpha - (2.0 / (m * n)) * c_sum
 
 
@@ -281,14 +305,12 @@ def compute_h(LP_list, alpha_vec, m, n, c_sum, device):
 # Algorithm 1: Gradient-Ranked Single-Swap Descent
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gradient_ranked_single_swap(LP_list, m, max_iters=5000, log_freq=5, device='cuda'):
-    n     = LP_list[0][0].shape[0]
-    c_sum = _build_c_sum(LP_list, n, device)
+def gradient_ranked_single_swap(apply_kernel, n, m, c_sum, max_iters=5000, log_freq=5, device='cuda'):
 
     perm  = torch.randperm(n, device=device)
     alpha = torch.zeros(n, 1, device=device)
     alpha[perm[:m]] = 1.0
-    h     = compute_h(LP_list, alpha, m, n, c_sum, device)
+    h     = compute_h(apply_kernel, alpha, m, n, c_sum)
 
     objective_history = []
 
@@ -312,7 +334,7 @@ def gradient_ranked_single_swap(LP_list, m, max_iters=5000, log_freq=5, device='
         alpha_tilde         = alpha.clone()
         alpha_tilde[i_t]    = 0.0
         alpha_tilde[j_t]    = 1.0
-        h_tilde             = compute_h(LP_list, alpha_tilde, m, n, c_sum, device)
+        h_tilde             = compute_h(apply_kernel, alpha_tilde, m, n, c_sum)
 
         delta_t = 0.5 * (h_tilde[j_t] - h_tilde[i_t] + h[j_t] - h[i_t]).item()
         if delta_t < 0:
@@ -338,7 +360,8 @@ def main():
     p.add_argument('--fraction',       default=0.3,         type=float)
     p.add_argument('--seed', '-seed',   default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str)
-    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset',        default='cifar100',  choices=['cifar10', 'cifar100', 'imagenet'])
+    p.add_argument('--arch',           default='resnet18',  choices=common.ARCHS)
     p.add_argument('--data_dir',       required=True,       type=str,
                    help='Root of the staged dataset (e.g. $SLURM_TMPDIR/cifar100_data)')
     p.add_argument('--proj_dim',       default=0,           type=int,
@@ -367,6 +390,11 @@ def main():
                    help="Transform used when extracting features ('train' = previous behaviour)")
     p.add_argument('--selection_only', action='store_true', default=False,
                    help='Stop after saving indices + timing (skip retraining)')
+    p.add_argument('--full_gradient', action='store_true', default=False,
+                   help='Use exact full-network gradients instead of last-layer factorization '
+                        '(memory-safe streaming operator; much slower).')
+    p.add_argument('--full_grad_chunk', default=8, type=int,
+                   help='Per-sample-gradient micro-batch size used by --full_gradient.')
     args = p.parse_args()
 
     set_seed(args.seed)
@@ -395,14 +423,13 @@ def main():
     cfg         = get_dataset_config(args.dataset, args.data_dir, download=args.download)
     NUM_CLASSES = cfg['num_classes']
     NUM_EPOCHS  = cfg['num_epochs']
-    FEAT_DIM    = 512           # ResNet18 penultimate layer width
 
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     budget  = int(args.fraction * n_train)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir     = f"{scratch_path}/gradmatch_swap/{args.dataset}/{budget}/seed_{args.seed}"
+    base_dir     = f"{scratch_path}/gradmatch_swap/{args.dataset}/{args.arch}/{budget}/seed_{args.seed}"
     os.makedirs(base_dir, exist_ok=True)
 
     # ── 2. Logging ───────────────────────────────────────────────────────────
@@ -412,6 +439,8 @@ def main():
     # The "_lrw" suffix marks learning-rate-weighted runs, so they never
     # overwrite the earlier unweighted results.
     file_prefix = f"kl_faithful_{budget}_K{num_ckpts_used}" + ("_lrw" if lr_weighted else "")
+    if args.full_gradient:
+        file_prefix += "_fullgrad"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -422,9 +451,10 @@ def main():
         ],
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  "
                 f"num_checkpoints={num_ckpts_used}/{n_available}  "
                 f"lr_weighted={lr_weighted}  "
+                f"full_gradient={args.full_gradient}  "
                 f"device={'cuda' if torch.cuda.is_available() else 'cpu'}")
     if ckpt_warning:
         logger.warning(ckpt_warning)
@@ -452,15 +482,20 @@ def main():
                              pin_memory=True, num_workers=args.num_workers)
 
     # ── 4. Reference model ───────────────────────────────────────────────────
-    ref_model = ResNet18(num_classes=NUM_CLASSES)
-    if cfg['cifar_style']:
-        ref_model.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        ref_model.maxpool = nn.Identity()
-    ref_model = ref_model.to(device)
+    ref_model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
+    FEAT_DIM = common.get_classifier_layer(ref_model).in_features
 
     # ── 5. JL matrices ───────────────────────────────────────────────────────
     k = args.proj_dim
-    if k > 0:
+    if args.full_gradient:
+        R_L = R_Phi = None
+        if args.dataset == "imagenet":
+            raise ValueError("--full_gradient is not supported for ImageNet in this implementation.")
+        logger.warning(
+            "--full_gradient uses exact per-sample full-network gradients with a streaming K@v operator. "
+            "This is memory-safe but much slower than the default last-layer factorization."
+        )
+    elif k > 0:
         mem_jl  = n_train * 2 * k * 4 / 1e9
         mem_fac = n_train * (NUM_CLASSES + FEAT_DIM) * 4 / 1e9
         mem_g   = n_train * NUM_CLASSES * FEAT_DIM * 4 / 1e9
@@ -507,15 +542,31 @@ def main():
 
     timer = common.SelectionTimer(device)
     with timer.phase('scoring'):
-        LP_list = load_trajectory_factored_features(
-            ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi, etas=etas,
-        )
+        if args.full_gradient:
+            ones = torch.ones(n_train, 1, dtype=torch.float64)
+
+            def apply_kernel(v):
+                return _full_gradient_kernel_vector(
+                    ref_model, eval_loader, ckpt_paths, v, device,
+                    grad_chunk=args.full_grad_chunk, etas=etas, logger=logger,
+                )
+
+            c_sum = apply_kernel(ones)
+        else:
+            LP_list = load_trajectory_factored_features(
+                ref_model, eval_loader, ckpt_paths, device, R_L=R_L, R_Phi=R_Phi, etas=etas,
+            )
+
+            def apply_kernel(v):
+                return _factored_Kv(LP_list, v, device)
+
+            c_sum = _build_c_sum(LP_list, n_train, device)
 
     # ── 8. Algorithm 1 ───────────────────────────────────────────────────────
     logger.info(f"Running single-swap descent  (budget={budget}/{n_train}) ...")
     with timer.phase('selection'):
         selected_indices, objective_history, total_iters = gradient_ranked_single_swap(
-            LP_list, budget, max_iters=args.max_iters, log_freq=5, device=device,
+            apply_kernel, n_train, budget, c_sum, max_iters=args.max_iters, log_freq=5, device=device,
         )
     logger.info(f"Converged in {total_iters} iterations, "
                 f"{len(selected_indices)} samples selected.")
@@ -538,11 +589,7 @@ def main():
         batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=args.num_workers,
     )
 
-    model = ResNet18(num_classes=NUM_CLASSES)
-    if cfg['cifar_style']:
-        model.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        model.maxpool = nn.Identity()
-    model = model.to(device)
+    model = common.build_model(cfg, NUM_CLASSES, device, args.arch)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9,

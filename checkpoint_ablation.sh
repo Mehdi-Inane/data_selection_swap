@@ -2,7 +2,7 @@
 #SBATCH --job-name=kl_checkpoint_ablation
 #SBATCH --output=logs/kl_ckpt_ablation_%A_%a.txt
 #SBATCH --error=logs/kl_ckpt_ablation_%A_%a.txt
-#SBATCH --array=0-99                 # 100 tasks = 4 fractions × 5 seeds × 5 checkpoint counts
+#SBATCH --array=0-599                # 6 (dataset,arch) combos × 4 fractions × 5 seeds × 5 checkpoint counts
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
 #SBATCH --time=15:00:00
@@ -18,7 +18,8 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
-DATASET="cifar100"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
+DATASETS=(cifar10 cifar100)
+ARCHS=(resnet18 vgg16 inception)
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 CHECKPOINTS=(1 3 5 10 20)    # --num_checkpoints values to ablate: use only the
@@ -29,29 +30,33 @@ BATCH_SIZE=128
 LR=0.01
 NUM_WORKERS=4
 
-# ── Map flat task ID → (fraction, seed, num_checkpoints) ────────────────────
-# Array is 0-99. There are NUM_SEEDS*NUM_CKPTS = 25 tasks per fraction, and
-# NUM_CKPTS = 5 tasks per (fraction, seed) — one per checkpoint count.
-if [ -n "${DATASET_OVERRIDE:-}" ]; then
-    DATASET="$DATASET_OVERRIDE"
-fi
+# ── Map flat task ID → (dataset, arch, fraction, seed, num_checkpoints) ─────
+# Per (dataset,arch): 4 fractions × 5 seeds × 5 checkpoint counts = 100 tasks.
 
 NUM_SEEDS=${#SEEDS[@]}
 NUM_CKPTS=${#CHECKPOINTS[@]}
 TASKS_PER_FRACTION=$(( NUM_SEEDS * NUM_CKPTS ))
+TASKS_PER_COMBO=$(( ${#FRACTIONS[@]} * TASKS_PER_FRACTION ))
 
-FRACTION_IDX=$(( SLURM_ARRAY_TASK_ID / TASKS_PER_FRACTION ))
-REMAINDER=$(( SLURM_ARRAY_TASK_ID % TASKS_PER_FRACTION ))
+IDX="${SLURM_ARRAY_TASK_ID:-0}"
+COMBO_IDX=$(( IDX / TASKS_PER_COMBO ))
+COMBO_REM=$(( IDX % TASKS_PER_COMBO ))
+FRACTION_IDX=$(( COMBO_REM / TASKS_PER_FRACTION ))
+REMAINDER=$(( COMBO_REM % TASKS_PER_FRACTION ))
 SEED_IDX=$(( REMAINDER / NUM_CKPTS ))
 CKPT_IDX=$(( REMAINDER % NUM_CKPTS ))
 
+DATASET="${DATASETS[$(( COMBO_IDX / ${#ARCHS[@]} ))]}"
+ARCH="${ARCHS[$(( COMBO_IDX % ${#ARCHS[@]} ))]}"
 FRACTION=${FRACTIONS[$FRACTION_IDX]}
 SEED=${SEEDS[$SEED_IDX]}
 NUM_CHECKPOINTS=${CHECKPOINTS[$CKPT_IDX]}
+if [ -n "${DATASET_OVERRIDE:-}" ]; then DATASET="$DATASET_OVERRIDE"; fi
+if [ -n "${ARCH_OVERRIDE:-}" ]; then ARCH="$ARCH_OVERRIDE"; fi
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints"
+CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCH}/checkpoints"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 mkdir -p "$CHECKPOINT_DIR"
@@ -63,6 +68,7 @@ stage_dataset "$DATASET" "$LOCAL_DATA"
 echo "=================================================="
 echo " SLURM Array Task ID : $SLURM_ARRAY_TASK_ID"
 echo " Dataset             : $DATASET"
+echo " Architecture        : $ARCH"
 echo " Fraction            : $FRACTION"
 echo " Seed                : $SEED"
 echo " Num Checkpoints (K) : $NUM_CHECKPOINTS"
@@ -78,6 +84,7 @@ echo "--------------------------------------------------"
 
 srun python train_kl_selection.py \
     --dataset "$DATASET" \
+    --arch "$ARCH" \
     --fraction "$FRACTION" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \

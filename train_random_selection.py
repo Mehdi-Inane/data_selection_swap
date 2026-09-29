@@ -21,9 +21,9 @@ def main():
         cfg, args.seed, args.batch_size, args.num_workers, args.scoring_transform)
     budget = int(args.fraction * n_train)
 
-    paths = common.get_save_paths('random', args.dataset, budget, args.seed)
+    paths = common.get_save_paths('random', args.dataset, args.arch, budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  device={device}")
+    logger.info(f"Dataset={args.dataset}  arch={args.arch}  budget={budget}  seed={args.seed}  device={device}")
 
     timer = common.SelectionTimer(device)
     with timer.phase('selection'):
