@@ -68,8 +68,8 @@ exact best-swap search. The exact search needs the per-pair curvature
 """
 
 import argparse
-import json
 import logging
+import math
 import os
 
 import torch
@@ -291,8 +291,19 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
     Returns the stopping reason alongside the subset, since "converged"
     and "ran out of sweeps" mean very different things here.
     """
-    n = traj.X.shape[0]
-    g = torch.Generator()
+    n = int(traj.X.shape[0])
+    if not 1 <= m < n:
+        raise ValueError(f"m must satisfy 1 <= m < n (got m={m}, n={n})")
+    if max_iters < 0:
+        raise ValueError("max_iters must be non-negative")
+    if swaps_per_sweep <= 0:
+        raise ValueError("swaps_per_sweep must be positive")
+    if candidates <= 0:
+        raise ValueError("candidates must be positive")
+    if refresh_every < 0:
+        raise ValueError("refresh_every must be non-negative")
+
+    g = torch.Generator(device='cpu')
     if seed is not None:
         g.manual_seed(seed)
     index = torch.randperm(n, generator=g)[:m].to(traj.X.device).sort().values
@@ -300,14 +311,21 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
     selected[index] = True
     traj.set_subset(index)
 
-    history = [{"iteration": 0, "D": traj.D(m), "swaps": 0}]
-    swaps, t, gamma = 0, 0, float('nan')
+    initial_D = traj.D(m)
+    history = [{"iteration": 0, "D": initial_D, "swaps": 0}]
+    swaps = accepted_updates = sweeps = attempted_exchanges = 0
+    gamma = float('nan')
     reason = 'max_iters'
-    best_rejected = None
-    cand = max(1, min(candidates, m, n - m))
+    last_change = last_rejected = best_rejected = None
+    best_lower_bound = -float('inf')
+    final_certificate = None
+    r = min(m, n - m)
+    cand = min(candidates, m * (n - m))
 
     def attempt(drop, add):
         """Exact float64 change for this exchange; applies it if negative."""
+        nonlocal attempted_exchanges
+        attempted_exchanges += 1
         deltas = [a - d for a, d in zip(traj.aggregate(add), traj.aggregate(drop))]
         change = traj.exact_change(deltas, m)
         if change < 0:
@@ -317,7 +335,9 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
             selected[add] = True
         return change
 
-    for t in range(1, max_iters + 1):
+    for sweep in range(1, max_iters + 1):
+        sweeps = sweep
+        D_before = traj.D(m)
         h = traj.gradient(m)
         sel_idx = torch.where(selected)[0]
         uns_idx = torch.where(~selected)[0]
@@ -328,11 +348,17 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
         # means no exchange even looks like a descent direction, which is
         # Algorithm 3's optimality test on the linear term alone.
         gamma = float(h[drop_order[0]] - h[add_order[0]])
+        best_lower_bound = max(
+            best_lower_bound, D_before - r * max(gamma, 0.0))
+        final_certificate = max(0.0, D_before - best_lower_bound)
+        history[-1].update({"sweep": sweep, "gamma": gamma,
+                            "lower_bound": best_lower_bound,
+                            "certificate_estimate": final_certificate})
         if gamma <= 0:
             reason = 'gamma<=0'
             break
 
-        accepted, change, best_rejected = False, None, None
+        accepted, change, last_rejected = False, None, None
 
         # Block exchange first: it is the only way to amortise the sweep
         # over more than one swap. Halve on failure — the ranking is a
@@ -342,8 +368,11 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
             change = attempt(drop_order[:block], add_order[:block])
             if change < 0:
                 swaps += block
+                accepted_updates += 1
                 accepted = True
             else:
+                last_rejected = (change if last_rejected is None
+                                 else min(last_rejected, change))
                 best_rejected = (change if best_rejected is None
                                  else min(best_rejected, change))
                 block //= 2
@@ -362,33 +391,60 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
                                  torch.tensor([j], device=h.device))
                 if change < 0:
                     swaps += 1
+                    accepted_updates += 1
                     accepted = True
                     break
+                last_rejected = (change if last_rejected is None
+                                 else min(last_rejected, change))
                 best_rejected = (change if best_rejected is None
                                  else min(best_rejected, change))
 
+        last_change = change
         if not accepted:
             reason = (f'top-{cand} candidates all rejected' if cand > 1
                       else 'top-ranked candidate rejected (Algorithm 3 stopping rule)')
             break
 
-        if refresh_every and t % refresh_every == 0:
+        if refresh_every and accepted_updates % refresh_every == 0:
             traj.set_subset(torch.where(selected)[0])
 
-        history.append({"iteration": t, "D": traj.D(m), "swaps": swaps,
-                        "gamma": gamma, "change": change})
-        if logger and (t % 10 == 0 or t == 1):
-            logger.info(f"sweep {t}: D={history[-1]['D']:.6e}  swaps={swaps}  "
+        D_after = traj.D(m)
+        final_certificate = max(0.0, D_after - best_lower_bound)
+        history.append({"iteration": accepted_updates, "sweep": sweep,
+                        "D": D_after, "swaps": swaps, "gamma": gamma,
+                        "change": change, "lower_bound": best_lower_bound,
+                        "certificate_estimate": final_certificate})
+        if logger and (sweep % 10 == 0 or sweep == 1):
+            logger.info(f"sweep {sweep}: D={D_after:.6e}  swaps={swaps}  "
                         f"gamma={gamma:.3e}  change={change:.3e}")
 
     index = torch.where(selected)[0]
     # u_I drifts as it accumulates differences; settle the reported value.
     traj.set_subset(index)
-    diag = {"reason": reason, "sweeps": t, "swaps": swaps, "final_gamma": gamma,
-            "best_rejected_change": best_rejected, "D": traj.D(m)}
-    history.append({"iteration": t, "final": True, **diag})
+    final_D = traj.D(m)
+    if math.isfinite(best_lower_bound):
+        final_certificate = max(0.0, final_D - best_lower_bound)
+    final_state_gradient_evaluated = reason != 'max_iters'
+    terminal_gamma = gamma if final_state_gradient_evaluated else None
+    diag = {"algorithm": 3, "rule": "ranked_full_network", "reason": reason,
+            "sweeps": sweeps, "attempted_exchanges": attempted_exchanges,
+            "accepted_updates": accepted_updates, "swaps": swaps,
+            "final_gamma": terminal_gamma, "last_evaluated_gamma": gamma,
+            "final_state_gradient_evaluated": final_state_gradient_evaluated,
+            "final_change": last_change,
+            "last_rejected_change": last_rejected,
+            "best_rejected_change": best_rejected, "D": final_D,
+            "lower_bound_estimate": (best_lower_bound
+                                     if math.isfinite(best_lower_bound) else None),
+            "certificate_estimate": final_certificate,
+            "certificate_valid": False,
+            "certificate_note": "Gradient ranks use float32 model JVPs; the bound is diagnostic.",
+            "algorithm_3_exact": swaps_per_sweep == 1 and candidates == 1,
+            "decision_dtype": "float64", "centered_acceptance": True}
+    history.append({"iteration": accepted_updates, "final": True, **diag})
     if logger:
-        logger.info(f"stopped after {t} sweeps: {reason}. final gamma={gamma:.3e}, "
+        gamma_text = "not evaluated" if terminal_gamma is None else f"{terminal_gamma:.3e}"
+        logger.info(f"stopped after {sweeps} sweeps: {reason}. final gamma={gamma_text}, "
                     f"best rejected exact change="
                     + ("n/a" if best_rejected is None else f"{best_rejected:.3e}"))
         if reason == 'max_iters':
@@ -406,7 +462,9 @@ def main():
     p.add_argument('--fraction',       default=0.3,         type=float)
     p.add_argument('--seed', '-seed',  default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str)
-    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset',        default='cifar100',  choices=list(common.DATASETS))
+    p.add_argument('--architecture',   default=None, choices=list(common.ARCHITECTURES),
+                   help='Network architecture. Defaults to resnet18, or lenet for MNIST.')
     p.add_argument('--data_dir',       required=True,       type=str)
     p.add_argument('--num_checkpoints', default=10,         type=int,
                    help='0 = every checkpoint found.')
@@ -477,7 +535,9 @@ def main():
         args.retrain_optimizer = (
             'adam' if use_metric or args.optimizer in ('adam', 'adam_update') else 'sgd')
 
-    cfg         = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg         = common.get_dataset_config(
+        args.dataset, args.data_dir, download=args.download,
+        architecture=args.architecture)
     NUM_CLASSES = cfg['num_classes']
     NUM_EPOCHS  = cfg['num_epochs']
     device      = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -485,6 +545,16 @@ def main():
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     budget  = int(args.fraction * n_train)
+    if not 1 <= budget < n_train:
+        raise ValueError(
+            f"--fraction={args.fraction!r} gives budget={budget}; require "
+            f"1 <= budget < n_train={n_train}."
+        )
+    trainset, _ = random_split(
+        cfg['full_train'], [n_train, n_val],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
 
     if not os.path.isdir(args.checkpoint_dir):
         raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
@@ -494,19 +564,59 @@ def main():
         epochs=args.checkpoint_epochs, n_train=n_train, batch_size=args.batch_size,
         base_lr=args.ref_lr, num_epochs=NUM_EPOCHS, beta1=args.beta1,
         momentum=args.momentum_response, metric=args.metric,
-        checkpoint_weighting=args.checkpoint_weighting)
+        checkpoint_weighting=args.checkpoint_weighting,
+        expected_dataset=args.dataset, expected_seed=args.seed,
+        expected_architecture=cfg['architecture'],
+        expected_pool_indices_sha256=pool_indices_sha256)
     K = len(checkpoints)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
     base_dir = f"{scratch_path}/gradmatch_swap/{args.dataset}/{budget}/seed_{args.seed}"
     os.makedirs(base_dir, exist_ok=True)
 
-    method = 'kl_faithful_full' + ref.objective_tag(
+    method = f"kl_faithful_full_{cfg['architecture']}" + ref.objective_tag(
         args.optimizer, args.metric, args.checkpoint_weighting,
         args.momentum_response)
     if args.scoring_transform != 'test':
         method += f'_{args.scoring_transform}view'
-    file_prefix = f"{method}_{budget}_K{K}"
+    if manifest is not None:
+        trajectory_identity = {
+            'manifest_run_id': manifest.get('run_id'),
+            'manifest_fingerprint': common.config_fingerprint(manifest),
+        }
+    else:
+        trajectory_identity = {
+            'legacy_directory': os.path.realpath(args.checkpoint_dir),
+            'files': [
+                {'path': os.path.realpath(c.path),
+                 'size': os.stat(c.path).st_size,
+                 'mtime_ns': os.stat(c.path).st_mtime_ns}
+                for c in checkpoints
+            ],
+        }
+    run_config = {
+        'schema_version': 2,
+        'selector': 'kl_full_network',
+        'arguments': {**vars(args),
+                      'checkpoint_dir': os.path.realpath(args.checkpoint_dir),
+                      'data_dir': os.path.realpath(args.data_dir),
+                      'init_ckpt': (os.path.realpath(args.init_ckpt)
+                                    if args.init_ckpt else None)},
+        'resolved': {
+            'dataset': args.dataset, 'architecture': cfg['architecture'],
+            'n_train': n_train, 'budget': budget,
+            'pool_indices_sha256': pool_indices_sha256,
+            'trajectory': trajectory_identity,
+            'checkpoints': [
+                {'path': os.path.realpath(c.path), 'epoch': c.epoch,
+                 'step': c.step, 'lr': c.lr, 'weight': c.weight,
+                 'window': list(c.window)}
+                for c in checkpoints
+            ],
+        },
+    }
+    run_id = common.config_fingerprint(run_config)
+    file_prefix = f"{method}_{budget}_K{K}_cfg{run_id}"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -515,8 +625,10 @@ def main():
                   logging.StreamHandler()],
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Dataset={args.dataset}  budget={budget}/{n_train}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  architecture={cfg['architecture']}  "
+                f"budget={budget}/{n_train}  seed={args.seed}  "
                 f"device={device}")
+    logger.info(f"Immutable run fingerprint: {run_id}")
     logger.info(f"Trajectory: {ckpt_description}"
                 + ("" if manifest else "  (legacy dir, eta_s reconstructed from the "
                                         "cosine schedule)"))
@@ -546,15 +658,33 @@ def main():
                  indices=os.path.join(base_dir, f"{file_prefix}_indices.pt"),
                  metrics=os.path.join(base_dir, f"{file_prefix}_metrics.json"),
                  timing=os.path.join(base_dir, f"{file_prefix}_timing.json"),
-                 objective=os.path.join(base_dir, f"{file_prefix}_objective.json"))
+                 objective=os.path.join(base_dir, f"{file_prefix}_objective.json"),
+                 run=os.path.join(base_dir, f"{file_prefix}_run.json"))
+    if args.selection_only:
+        stale = [path for path in (paths['model'], paths['metrics'])
+                 if os.path.exists(path)]
+        if stale:
+            raise FileExistsError(
+                "Refusing --selection_only because retraining artifacts already exist "
+                f"for this exact run: {stale}. Remove them explicitly or change the "
+                "configuration.")
+    common.atomic_json_dump(
+        {'schema_version': 1, 'run_id': run_id, 'status': 'configured',
+         'config': run_config}, paths['run'])
 
-    trainset, _ = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
     scoring_set = common.scoring_subset(cfg, trainset, args.scoring_transform)
 
-    model = common.build_model(cfg, NUM_CLASSES, device)
+    model = common.build_model(
+        cfg, NUM_CLASSES, device, architecture=cfg['architecture'])
+    uses_batchnorm = any(
+        isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
+        for module in model.modules())
+    if uses_batchnorm:
+        logger.warning(
+            "The model contains BatchNorm. Selection scores per-example gradients "
+            "with frozen running statistics (model.eval()); this is a reproducible "
+            "surrogate, not the train-mode BatchNorm gradient field that produced "
+            "the reference trajectory.")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # Every sweep touches the whole pool many times over, so it is
@@ -583,25 +713,34 @@ def main():
                 f"D: {history[0]['D']:.6e} -> {diag['D']:.6e}")
 
     common.save_timing(paths['timing'], timer, logger, method=method,
+                       run_id=run_id,
                        reference_epochs_used=max(c.epoch for c in checkpoints),
                        swap_iterations=diag['sweeps'], accepted_swaps=diag['swaps'],
+                       accepted_updates=diag['accepted_updates'],
+                       attempted_exchanges=diag['attempted_exchanges'],
                        stopping_reason=diag['reason'],
                        final_gamma=diag['final_gamma'],
+                       final_change=diag['final_change'],
                        best_rejected_change=diag['best_rejected_change'],
                        final_D=diag['D'], metric_scale=traj.metric_scale,
+                       lower_bound_estimate=diag['lower_bound_estimate'],
+                       certificate_estimate=diag['certificate_estimate'],
+                       certificate_valid=diag['certificate_valid'],
+                       algorithm_3_exact=diag['algorithm_3_exact'],
                        swaps_per_sweep=args.swaps_per_sweep,
                        candidates=args.candidates,
                        objective_optimizer=args.optimizer,
                        objective_metric='D_k^2' if use_metric else 'I',
                        momentum_response=args.momentum_response,
                        scoring_transform=args.scoring_transform,
+                       batchnorm_scoring_mode=('eval_frozen' if uses_batchnorm else 'none'),
+                       train_mode_gradient_correspondence=not uses_batchnorm,
                        checkpoint_selection=args.checkpoint_selection,
                        checkpoint_weighting=args.checkpoint_weighting,
                        checkpoint_steps=[c.step for c in checkpoints],
                        checkpoint_weights=[c.weight for c in checkpoints],
                        num_checkpoints_used=K)
-    with open(paths['objective'], 'w') as fh:
-        json.dump(history, fh, indent=4)
+    common.atomic_json_dump(history, paths['objective'])
 
     # The pool, the float64 trajectory state and K sets of weights are all
     # still resident; retraining needs none of them.
@@ -611,6 +750,14 @@ def main():
         torch.cuda.empty_cache()
 
     common.finish(cfg, trainset, selected_indices, device, args, logger, paths)
+    status = 'selection_complete' if args.selection_only else 'complete'
+    artifacts = {'indices': paths['indices'], 'objective': paths['objective'],
+                 'timing': paths['timing']}
+    if not args.selection_only:
+        artifacts.update({'model': paths['model'], 'metrics': paths['metrics']})
+    common.atomic_json_dump(
+        {'schema_version': 1, 'run_id': run_id, 'status': status,
+         'config': run_config, 'artifacts': artifacts}, paths['run'])
 
 
 if __name__ == '__main__':

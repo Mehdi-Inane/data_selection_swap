@@ -1,33 +1,40 @@
-# Experimental protocol: KL-Faithful vs. data-selection baselines
+# Experimental protocol: trajectory selection and controlled comparisons
 
-Two quantities are compared: **test accuracy after retraining on the subset**
-and **time to produce the subset**. Everything that is not the selection rule
-is held fixed; every selection rule is run the way its authors run it.
+Two quantities are compared: **final test accuracy after retraining on the
+subset** and **time to produce the subset**. The configuration-hashed drivers
+under `scripts/experiments/` are the source of truth for controlled claims.
+The older all-baseline launcher is useful for exploratory comparisons, but its
+method-specific training work means it is not, by itself, a pure
+selection-rule-only experiment.
 
 ## 1. Held fixed for every method
 
 | Component | Setting (source: `data_selection_swap.selection.kl`) |
 |---|---|
-| Data | CIFAR-100 / ImageNet, 90/10 train/val `random_split(seed)`; selection pool = the 90% split |
+| Data | CIFAR-10 / CIFAR-100 / MNIST / ImageNet, 90/10 train/val `random_split(seed)`; selection pool = the 90% split |
 | Budgets | `fraction ∈ {0.1, 0.2, 0.4, 0.5}` of `n_train`, exact size `int(fraction · n_train)` |
 | Seeds | 42–46; the seed fixes the split, the method's randomness and the retrain init |
-| Architecture | cords ResNet-18 (CIFAR stem on CIFAR-100), for selection **and** retraining |
+| Architecture | One declared model per comparison cell: ResNet-18, ResNet-34, LeNet, or ConvNet |
 | Retraining | Optimizer matched to the score (SGD for uniform/SGD, Adam for Adam), cosine schedule, 300 / 350 epochs, bs 128, unweighted CE |
-| Metric | Final-epoch top-1 test accuracy (no best-epoch picking on the test set) |
+| Metric | Final-epoch top-1 test accuracy. Controlled drivers evaluate the official test set once per fit. |
 | Scoring view | `--scoring_transform` — same value for every method (see §4) |
 | Hardware | Same GPU type (`rtx8000`), 4 workers, one job per GPU |
 
-The retrain loop is `data_selection_swap.common.retrain_on_subset`, shared by
-the selection workflows. Within an optimizer comparison, differences in
-accuracy therefore come only from `selected_indices`. Use
-`--retrain_optimizer` explicitly when holding the retraining optimizer fixed
-across optimizer-aware scoring ablations.
+Every reference is seed matched to the split it represents. Its manifest stores
+the dataset, architecture, seed, schedule, initial-state fingerprint, and hash
+of the ordered pool indices; consumers reject any mismatch. Controlled
+retraining uses frozen indices, a byte-identical initialization for paired
+cells, and a dedicated shuffle generator. Use `--retrain_optimizer` explicitly
+when holding the retraining optimizer fixed across optimizer-aware scoring
+ablations.
 
 ## 2. What each method is given (its canonical protocol)
 
-The shared resource is the full-data trajectory from `scripts/train/full_data.py`
-(checkpoints at epochs 1–10, then every 10 epochs). Each method uses as much of
-it as its paper uses, and trains anything extra it needs itself.
+The shared resource is a **per-seed** full-data trajectory from
+`scripts/train/full_data.py` (checkpoints at epochs 1–10, then every 10 epochs).
+Sparse checkpoint selections are spaced in optimizer-step time rather than
+saved-file position. Each method uses as much of the trajectory as its protocol
+requires and trains any additional probe/surrogate models itself.
 
 | Method | Signal | From | Rule | Class-balanced |
 |---|---|---|---|---|
@@ -43,20 +50,25 @@ it as its paper uses, and trains anything extra it needs itself.
 No method, including KL-Faithful, is tuned on the test set; baselines use the
 defaults of their papers / reference code.
 
-## 3. Same-information ablation
+## 3. Trajectory-kernel baseline sensitivity (legacy)
 
-KL-Faithful uses the *whole* trajectory's last-layer gradients, which is more
-information than most baselines use. To separate "better signal" from
-"better selection rule", each baseline can be given the same signal:
+KL-Faithful can use trajectory last-layer gradients, which is more information
+than most baselines use. The following legacy variants give other rules a
+trajectory-gradient kernel:
 
 | Variant | Flag |
 |---|---|
-| `herding_grad_trajectory`, `graphcut_grad_trajectory`, `facility_location_grad_trajectory` | `--kernel grad_trajectory`: per-class K = Σ_t (L_t L_tᵀ) ⊙ (Φ_t Φ_tᵀ), exactly KL-Faithful's kernel |
+| `herding_grad_trajectory`, `graphcut_grad_trajectory`, `facility_location_grad_trajectory` | `--kernel grad_trajectory`: per-class unweighted trajectory-gradient kernel |
 | `*_grad` | `--kernel grad`: same kernel, last checkpoint only |
 | `el2n_trajectory` | `--source trajectory`: trajectory checkpoint at epoch 20 instead of new probes |
 | `moso_trajectory[_lastlayer]` | `--source trajectory`: 10 evenly spaced trajectory checkpoints with their cosine η_t; optionally KL's last-layer gradient space |
 
 Run with `METHODS="..." sbatch --array=... scripts/slurm/run_baselines.sh`.
+These variants currently sum every checkpoint with unit weight. They are not
+identical-information controls for a KL run that uses a subset of checkpoints,
+learning-rate weights, Adam metrics, or a different bias/view convention. Do
+not describe them as selection-rule-only comparisons. Use
+`compare_swap_rules.py` for the exact Algorithm 2/3 controlled comparison.
 
 ## 4. Known confound: augmentation during scoring
 
@@ -113,10 +125,33 @@ second is the honest cost when no full-data model exists yet.
 ## 7. Running
 
 ```bash
-sbatch scripts/slurm/run_full_data.sh             # trajectory + train_time.json
-sbatch scripts/slurm/run_kl_selection.sh          # KL-Faithful
-sbatch scripts/slurm/run_baselines.sh             # canonical baselines
-python scripts/analyze/aggregate_comparison.py --dataset cifar100
+# General exploratory paths
+sbatch scripts/slurm/run_full_data.sh
+sbatch scripts/slurm/run_kl_selection.sh
+sbatch scripts/slurm/run_baselines.sh
+
+# Controlled requested experiments
+scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json
+scripts/slurm/submit_swap_rules.sh scripts/experiments/swap_rules.example.json
+STAGE=reference sbatch scripts/slurm/run_d_accuracy_correlation.sh
+# Submit STAGE=evaluate only after the reference array succeeds.
 ```
 
 To measure selection time without the retraining cost, add `--selection_only`.
+For exact commands, task counts, immutable artifact schemas, and analysis, see
+`scripts/experiments/README.md` and `README_D_CORRELATION.md` in that directory.
+
+## 8. Interpretation boundary
+
+The manuscript's KL theorem assumes full-batch Langevin dynamics. The
+maintained reference trainers use ordinary minibatch SGD/Adam (momentum,
+weight decay, and no injected Langevin noise), so `D(alpha)` is an empirical
+recorded-trajectory gradient-discrepancy score. Algorithm 2 and Algorithm 3 are
+implemented faithfully for that quadratic score; this does not by itself turn
+the experiment into a verification of the full Langevin KL theorem.
+
+With BatchNorm, independently scored examples use the model in evaluation mode
+with frozen running statistics. This is a reproducible surrogate, not the
+batch-dependent train-mode gradient field. The D/accuracy experiment rejects
+BatchNorm by default and treats explicitly enabled frozen-BN runs as separate
+sensitivity blocks.

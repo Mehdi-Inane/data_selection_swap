@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=gradmatch_cifar10_linear_layer
-#SBATCH --output=logs/linear_layer_gradmatch_cifar10_%A_%a.txt
-#SBATCH --error=logs/linear_layer_gradmatch_cifar10_%A_%a.txt
+#SBATCH --output=gradmatch_cifar10_%A_%a.txt
+#SBATCH --error=gradmatch_cifar10_%A_%a.txt
 #SBATCH --array=0-19                 # 20 tasks = 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1
@@ -31,9 +31,11 @@ SEED_IDX=$(( SLURM_ARRAY_TASK_ID % 5 ))
 
 FRACTION=${FRACTIONS[$FRACTION_IDX]}
 SEED=${SEEDS[$SEED_IDX]}
+ARCHITECTURE="${ARCHITECTURE:-resnet18}"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+INIT_CKPT="${SCRATCH_BASE}/data_selection_swap/init/cifar10_${ARCHITECTURE}_seed${SEED}.pth"
 
 # Where CIFAR-10 is already installed on the shared filesystem.
 # torchvision expects: $CIFAR10_CACHE/cifar-10-batches-py/
@@ -83,6 +85,7 @@ echo "--------------------------------------------------"
 
 srun python "${PROJECT_ROOT}/scripts/select/gradmatch.py" \
     --dataset     cifar10           \
+    --architecture "$ARCHITECTURE" \
     --fraction    "$FRACTION"       \
     -seed         "$SEED"           \
     --data_dir    "$LOCAL_DATA"     \
@@ -93,6 +96,8 @@ srun python "${PROJECT_ROOT}/scripts/select/gradmatch.py" \
     --kappa       0.0               \
     --lam         0.5               \
     --linear_layer                  \
+    --retrain_optimizer sgd         \
+    --init_ckpt "$INIT_CKPT"       \
     ${DOWNLOAD_FLAG:-}
 
 echo ""

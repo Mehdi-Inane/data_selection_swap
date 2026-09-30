@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=selection_baselines
-#SBATCH --output=logs/baselines_%A_%a.txt
-#SBATCH --error=logs/baselines_%A_%a.txt
+#SBATCH --output=baselines_%A_%a.txt
+#SBATCH --error=baselines_%A_%a.txt
 #SBATCH --array=0-139                # 7 methods × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # match run_kl_selection.sh for comparable timing
@@ -23,12 +23,15 @@ set -u
 
 # ── Experiment Hyperparameters (identical to alg3.sh) ───────────────────────
 DATASET="${DATASET_OVERRIDE:-cifar100}"
+ARCHITECTURE="${ARCHITECTURE:-resnet18}"
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 BATCH_SIZE=128
 LR=0.01
+RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-sgd}"
 NUM_WORKERS=4
-SCORING_TRANSFORM="${SCORING_TRANSFORM:-train}"   # must match the KL run
+SCORING_TRANSFORM="${SCORING_TRANSFORM:-test}"   # must match the KL run
+INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH:-./scratch}/data_selection_swap/init}"
 
 # Canonical (paper-protocol) configuration of each baseline. Override with e.g.
 #   METHODS="herding_grad_trajectory el2n_trajectory moso_trajectory" \
@@ -68,9 +71,18 @@ esac
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints"
+CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
+if [ ! -d "$CHECKPOINT_DIR" ]; then
+    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
+    exit 1
+fi
+
+INIT_ARGS=()
+if [ -n "$INIT_CKPT_DIR" ]; then
+    INIT_ARGS=(--init_ckpt "${INIT_CKPT_DIR}/${DATASET}_${ARCHITECTURE}_seed${SEED}.pth")
+fi
 
 source "${SCRIPT_DIR}/stage_dataset.sh"
 stage_dataset "$DATASET" "$LOCAL_DATA"
@@ -82,11 +94,15 @@ echo "=================================================="
 
 srun python "${CMD[@]}" \
     --dataset "$DATASET" \
+    --architecture "$ARCHITECTURE" \
     --fraction "$FRACTION" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --data_dir "$LOCAL_DATA" \
     --batch_size "$BATCH_SIZE" \
     --lr "$LR" \
+    --retrain_optimizer "$RETRAIN_OPTIMIZER" \
     --num_workers "$NUM_WORKERS" \
-    --scoring_transform "$SCORING_TRANSFORM"
+    --download \
+    --scoring_transform "$SCORING_TRANSFORM" \
+    "${INIT_ARGS[@]}"

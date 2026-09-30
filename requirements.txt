@@ -1,9 +1,16 @@
+# Keep the production package index primary. TestPyPI is consulted only for
+# packages (notably some submodlib builds) that are unavailable on PyPI.
+--index-url https://pypi.org/simple/
+--extra-index-url https://test.pypi.org/simple/
+
 apricot-select>=0.6.0
 numba>=0.43.0
 scipy>=1.5.0
 scikit-learn
 torch>=1.8.0
 torchvision
+# Model factory and maintained GradMatch baseline.
+cords==0.0.4
 tqdm>=4.24.0
 sphinxcontrib-napoleon
 sphinxcontrib-bibtex
@@ -18,8 +25,6 @@ pyyaml~=5.4.1
 dotmap~=1.3.24
 ray[tune]
 ray[default]
--i https://test.pypi.org/simple/
---extra-index-url https://pypi.org/simple/
 submodlib
 datasets
 transformers

@@ -60,7 +60,6 @@ Reproducing the pre-existing runs: --optimizer uniform --rule ranked
 """
 
 import argparse
-import json
 import logging
 import math
 import os
@@ -149,7 +148,7 @@ def extract_factored_features(
     def _hook(_, inp, __):
         features_dict['phi'] = inp[0]
 
-    handle = model.linear.register_forward_hook(_hook)
+    handle = common.classifier_layer(model).register_forward_hook(_hook)
 
     with torch.no_grad():
         for start in range(0, X.shape[0], batch_size):
@@ -181,9 +180,10 @@ def build_weighted_trajectory(model, X, Y, batch_size, checkpoints, device, use_
     """
     [(L_k, Phi_k, M_k, w_k)], all resident on `device`.
 
-    Keeping the factors on the GPU for the whole of selection is what makes
-    the swap loop cheap: a kernel column is then O(n(C+F)) arithmetic with
-    no host transfer, against O(nCF) plus a 1.1 GB copy for a full matvec.
+    Keeping the factors on the GPU avoids host transfer and the n-by-(CF)
+    materialisation. A generic kernel matvec is still O(nCF) arithmetic;
+    factorisation is primarily the decisive memory reduction, not an
+    O(n(C+F)) arithmetic shortcut.
 
     M_k is None for the Euclidean objectives. For adam it is D_k^2 shaped
     [C, F(+1)], rescaled by one factor shared across all checkpoints:
@@ -273,183 +273,392 @@ def kernel_pairs(traj, i_idx, j_idx):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Algorithm 1: Gradient-Ranked Single-Swap Descent
+# Numerically stable centered objective used by Algorithms 2 and 3
+
+_FP64_CHUNK_SIZE = 2048
+
+
+def _validate_factored_swap_problem(traj, m, max_iters, log_freq=1,
+                                    max_pairs=0, batch_pairs=1):
+    """Validate the PSD assumptions used by both manuscript algorithms."""
+    if not traj:
+        raise ValueError("The trajectory must contain at least one checkpoint")
+    n = int(traj[0][0].shape[0])
+    if not 1 <= m < n:
+        raise ValueError(f"m must satisfy 1 <= m < n (got m={m}, n={n})")
+    if max_iters < 0:
+        raise ValueError("max_iters must be non-negative")
+    if log_freq <= 0:
+        raise ValueError("log_freq must be positive")
+    if max_pairs < 0:
+        raise ValueError("max_pairs must be non-negative")
+    if batch_pairs <= 0:
+        raise ValueError("batch_pairs must be positive")
+
+    device = traj[0][0].device
+    positive_weight = False
+    for k, (L, Phi, M, w) in enumerate(traj):
+        if L.ndim != 2 or Phi.ndim != 2 or L.shape[0] != n or Phi.shape[0] != n:
+            raise ValueError(f"Invalid factor shapes at checkpoint {k}: "
+                             f"L={tuple(L.shape)}, Phi={tuple(Phi.shape)}")
+        if L.device != device or Phi.device != device:
+            raise ValueError("All trajectory factors must be on the same device")
+        weight = float(w)
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"Checkpoint weights must be finite and non-negative; got {w}")
+        positive_weight |= weight > 0
+        if M is not None:
+            if M.shape != (L.shape[1], Phi.shape[1]):
+                raise ValueError(f"Metric shape {tuple(M.shape)} does not match "
+                                 f"({L.shape[1]}, {Phi.shape[1]}) at checkpoint {k}")
+            if M.device != device:
+                raise ValueError("Metrics and trajectory factors must share a device")
+            if not bool(torch.isfinite(M).all()) or bool((M < 0).any()):
+                raise ValueError("Exact screening requires a finite, non-negative metric")
+    if not positive_weight:
+        raise ValueError("At least one checkpoint weight must be positive")
+    return n, device
+
+
+def _outer_sum_fp64(L, Phi, index=None, chunk_size=_FP64_CHUNK_SIZE):
+    """Return ``sum_i outer(L_i, Phi_i)`` with float64 accumulation."""
+    if index is None:
+        index = torch.arange(L.shape[0], device=L.device)
+    else:
+        index = torch.as_tensor(index, dtype=torch.long, device=L.device).reshape(-1)
+    out = torch.zeros((L.shape[1], Phi.shape[1]), dtype=torch.float64, device=L.device)
+    for start in range(0, index.numel(), chunk_size):
+        idx = index[start:start + chunk_size]
+        out.add_(L[idx].double().T @ Phi[idx].double())
+    return out
+
+
+def _centered_state(traj, selected, m):
+    """Build Z_k = sum_{i in I} g_i^k - (m/n) sum_i g_i^k in float64."""
+    n = int(traj[0][0].shape[0])
+    centered = []
+    constant = 0.0
+    for L, Phi, M, w in traj:
+        total = _outer_sum_fp64(L, Phi)
+        subset = _outer_sum_fp64(L, Phi, selected)
+        z = subset - (float(m) / n) * total
+        metric = None if M is None else M.double()
+        mean = total / n
+        mean_sq = mean * mean
+        constant += float(w) * float(
+            (mean_sq if metric is None else mean_sq * metric).sum().item())
+        centered.append(z)
+    return centered, constant
+
+
+def _centered_D(traj, centered, m):
+    """Evaluate the manuscript's non-negative D(alpha)."""
+    total = 0.0
+    for (_, _, M, w), z in zip(traj, centered):
+        metric = None if M is None else M.double()
+        sq = z * z
+        total += float(w) * float(
+            (sq if metric is None else sq * metric).sum().item()) / (m ** 2)
+    return total
+
+
+def _centered_gradient(traj, centered, m, chunk_size=_FP64_CHUNK_SIZE):
+    """Compute h_i=(2/m^2)<g_i,MZ> without float32 cancellation."""
+    n = int(traj[0][0].shape[0])
+    h = torch.zeros(n, dtype=torch.float64, device=traj[0][0].device)
+    scale = 2.0 / (m ** 2)
+    for (L, Phi, M, w), z in zip(traj, centered):
+        tangent = z if M is None else M.double() * z
+        for start in range(0, n, chunk_size):
+            stop = min(start + chunk_size, n)
+            Lb, Pb = L[start:stop].double(), Phi[start:stop].double()
+            h[start:stop].add_(scale * float(w) * ((Lb @ tangent) * Pb).sum(dim=1))
+    return h
+
+
+def _pair_changes_fp64(traj, centered, m, i_idx, j_idx, linear_terms=None):
+    """Exact centered float64 objective changes for exchanges ``i -> j``."""
+    factor_device = traj[0][0].device
+    ii = torch.as_tensor(i_idx, dtype=torch.long, device=factor_device).reshape(-1)
+    jj = torch.as_tensor(j_idx, dtype=torch.long, device=factor_device).reshape(-1)
+    if ii.numel() != jj.numel():
+        raise ValueError("i_idx and j_idx must have the same length")
+    if linear_terms is None:
+        changes = torch.zeros(ii.numel(), dtype=torch.float64, device=factor_device)
+    else:
+        changes = torch.as_tensor(
+            linear_terms, dtype=torch.float64, device=factor_device).reshape(-1).clone()
+        if changes.numel() != ii.numel():
+            raise ValueError("linear_terms and pair indices must have the same length")
+
+    for (L, Phi, M, w), z in zip(traj, centered):
+        li, lj = L[ii].double(), L[jj].double()
+        pi, pj = Phi[ii].double(), Phi[jj].double()
+        metric = None if M is None else M.double()
+        if linear_terms is None:
+            tangent = z if metric is None else metric * z
+            inner_i = ((li @ tangent) * pi).sum(dim=1)
+            inner_j = ((lj @ tangent) * pj).sum(dim=1)
+
+        if metric is None:
+            diag_i = (li * li).sum(dim=1) * (pi * pi).sum(dim=1)
+            diag_j = (lj * lj).sum(dim=1) * (pj * pj).sum(dim=1)
+            cross = (li * lj).sum(dim=1) * (pi * pj).sum(dim=1)
+        else:
+            diag_i = (((li * li) @ metric) * (pi * pi)).sum(dim=1)
+            diag_j = (((lj * lj) @ metric) * (pj * pj)).sum(dim=1)
+            cross = (((li * lj) @ metric) * (pi * pj)).sum(dim=1)
+
+        # Preserve the PSD lower bound if the norm is a few ulps negative.
+        curvature = (diag_i + diag_j - 2.0 * cross).clamp_min_(0.0)
+        changes.add_(float(w) * curvature / (m ** 2))
+        if linear_terms is None:
+            changes.add_(float(w) * 2.0 * (inner_j - inner_i) / (m ** 2))
+    return changes
+
+
+def _apply_centered_swap(traj, centered, i, j):
+    for (L, Phi, _, _), z in zip(traj, centered):
+        z.add_(torch.outer(L[j].double(), Phi[j].double())
+               - torch.outer(L[i].double(), Phi[i].double()))
+
+
+def _state_record(rule, swaps, pair_searches, D, constant, gamma,
+                  lower_bound, certificate):
+    return {"rule": rule, "iteration": swaps, "swaps": swaps,
+            "pair_searches": pair_searches, "objective": D - constant,
+            "D": D, "gamma": gamma, "lower_bound": lower_bound,
+            "certificate": certificate}
+
+
+# Algorithms 3 and 2 from the manuscript
 # ─────────────────────────────────────────────────────────────────────────────
 
 def gradient_ranked_single_swap(traj, m, max_iters=5000, log_freq=5, device='cuda',
                                  seed=None):
-    """
-    Algorithm 3 of the manuscript, unchanged apart from the kernel it calls.
+    """Faithful Algorithm 3 with centered float64 decisions and certificate.
 
-    Rank exchanges by the gradient h, test only the best-ranked candidate,
-    and accept it only if its *exact* change in the objective is negative.
-    The exact change of a one-for-one exchange delta = e_j - e_i is
-    (1/2) delta'(h + h_tilde) for any quadratic, which is why one extra
-    kernel-vector product suffices and the pair's own P_ij is never needed.
+    At each state only the pair with maximum selected h_i and minimum
+    unselected h_j is tested.  A non-negative exact change therefore stops
+    Algorithm 3 but does *not* claim one-swap local optimality.  The returned
+    history maintains the manuscript's best lower bound and monotone
+    history-aware excess certificate.
     """
-    n = traj[0][0].shape[0]
-    c_sum = weighted_kernel_mv(traj, torch.ones(n, device=device))
-
+    n, factor_device = _validate_factored_swap_problem(
+        traj, m, max_iters, log_freq=log_freq)
     g = torch.Generator(device='cpu')
     if seed is not None:
         g.manual_seed(seed)
-    perm = torch.randperm(n, generator=g).to(device)
-    alpha = torch.zeros(n, device=device)
-    alpha[perm[:m]] = 1.0
-    h = compute_h(traj, alpha, m, n, c_sum)
+    selected = torch.zeros(n, dtype=torch.bool, device=factor_device)
+    selected[torch.randperm(n, generator=g)[:m].to(factor_device)] = True
+    centered, constant = _centered_state(traj, torch.where(selected)[0], m)
 
-    objective_history = []
-    t, gamma_t, delta_t = 0, float('nan'), None
-    reason = 'max_iters'
+    history = []
+    swaps = pair_searches = states_evaluated = 0
+    reason, final_change = 'max_iters', None
+    last_accepted_change = None
+    final_gamma = float('nan')
+    best_lower_bound = -float('inf')
+    final_D = final_objective = final_certificate = float('nan')
+    r = min(m, n - m)
 
-    for t in range(max_iters):
+    while True:
+        D = _centered_D(traj, centered, m)
+        h = _centered_gradient(traj, centered, m)
+        states_evaluated += 1
+        sel, uns = torch.where(selected)[0], torch.where(~selected)[0]
+        i_t = int(sel[torch.argmax(h[sel])].item())
+        j_t = int(uns[torch.argmin(h[uns])].item())
+        final_gamma = float((h[i_t] - h[j_t]).item())
+        best_lower_bound = max(best_lower_bound,
+                               D - r * max(final_gamma, 0.0))
+        final_certificate = max(0.0, D - best_lower_bound)
+        final_D, final_objective = D, D - constant
+        record = _state_record('ranked', swaps, pair_searches, D, constant,
+                               final_gamma, best_lower_bound, final_certificate)
+        if swaps % log_freq == 0:
+            history.append(record)
+        final_change = None
 
-        if t % log_freq == 0:
-            objective_history.append({"iteration": t,
-                                      "objective": objective(h, c_sum, alpha, m, n)})
-
-        # Candidate: the selected index with the largest h, the unselected
-        # index with the smallest h. This pair minimises the linearised
-        # change h_j - h_i.
-        h_in = h.clone(); h_in[alpha == 0] = -float('inf')
-        i_t = int(torch.argmax(h_in).item())
-        h_out = h.clone(); h_out[alpha == 1] = float('inf')
-        j_t = int(torch.argmin(h_out).item())
-
-        gamma_t = h[i_t].item() - h[j_t].item()
-        if gamma_t <= 0:
-            reason = 'gamma<=0'
+        if final_gamma <= 0.0:
+            reason = 'gamma<=0 (globally optimal certificate)'
+            break
+        if pair_searches >= max_iters:
+            reason = 'max_iters'
             break
 
-        alpha_tilde = alpha.clone()
-        alpha_tilde[i_t] = 0.0
-        alpha_tilde[j_t] = 1.0
-        h_tilde = compute_h(traj, alpha_tilde, m, n, c_sum)
-
-        delta_t = 0.5 * (h_tilde[j_t] - h_tilde[i_t] + h[j_t] - h[i_t]).item()
-        if delta_t < 0:
-            alpha, h = alpha_tilde, h_tilde
-        else:
-            # Algorithm 3 stops here, but only the *top-ranked* pair was
-            # tested: a lower-ranked pair may still improve f. Use
-            # --rule best for the exact answer.
+        final_change = float(
+            _pair_changes_fp64(traj, centered, m, [i_t], [j_t])[0].item())
+        pair_searches += 1
+        if final_change >= 0.0:
             reason = 'top-ranked candidate rejected (Algorithm 3 stopping rule)'
             break
 
-    objective_history.append({"iteration": t,
-                              "objective": objective(h, c_sum, alpha, m, n)})
-    diag = {"rule": "ranked", "iterations": t, "swaps": t, "reason": reason,
-            "final_gamma": gamma_t, "final_change": delta_t,
-            "objective": objective_history[-1]["objective"]}
-    return torch.where(alpha == 1.0)[0].cpu(), objective_history, diag
+        _apply_centered_swap(traj, centered, i_t, j_t)
+        selected[i_t], selected[j_t] = False, True
+        swaps += 1
+        last_accepted_change = final_change
+
+    final_record = _state_record('ranked', swaps, pair_searches, final_D, constant,
+                                 final_gamma, best_lower_bound, final_certificate)
+    final_record.update({"final": True, "change": final_change, "reason": reason})
+    if not history or history[-1].get("iteration") != swaps:
+        history.append(final_record)
+    else:
+        history[-1].update(final_record)
+
+    diag = {"algorithm": 3, "rule": "ranked", "iterations": swaps,
+            "pair_searches": pair_searches, "states_evaluated": states_evaluated,
+            "swaps": swaps, "reason": reason, "final_gamma": final_gamma,
+            "final_change": final_change,
+            "last_accepted_change": last_accepted_change, "D": final_D,
+            "objective": final_objective, "lower_bound": best_lower_bound,
+            "certificate": final_certificate, "certificate_valid": True,
+            "globally_optimal": final_gamma <= 0.0,
+            "one_swap_local_optimum": final_gamma <= 0.0,
+            "decision_dtype": "float64", "centered_acceptance": True}
+    return torch.where(selected)[0].cpu(), history, diag
 
 
 def best_swap(traj, m, max_iters=5000, log_freq=5, device='cuda', seed=None,
               max_pairs=0, batch_pairs=8192, logger=None):
+    """Faithful Algorithm 2; ``max_pairs=0`` performs the exact pair search.
+
+    Feasible pairs are visited by increasing linear term h_j-h_i.  Their
+    curvature is a non-negative squared norm, so once the next linear term
+    cannot beat the best exact change already seen, the argmin is certified
+    without forming P.  A positive ``max_pairs`` deliberately truncates this
+    proof and is labelled non-exact in the diagnostics.
     """
-    Algorithm 2: the exact best single swap, found without storing P.
-
-    Algorithm 3 tests only its top-ranked pair, so rejecting that pair
-    does not mean no improving swap exists. The exact change is
-
-        Delta_ij = h_j - h_i + (1/m^2) sum_k w_k ||g_j^k - g_i^k||^2_{M_k}
-                 = h_j - h_i + (1/m^2) (d_i + d_j - 2 P_ij),
-
-    a linear term plus a *non-negative* curvature term. So enumerate
-    pairs in increasing h_j - h_i (``common.ranked_pairs``), keep
-    the best exact Delta seen, and stop as soon as the next unexamined
-    linear term is >= that best: no pair beyond it can beat it, because
-    curvature only adds. What remains is an exact search, and when it
-    reports no improving swap, there genuinely is none.
-
-    The screening is exact but not cheap in the worst case — m(n-m) is
-    425 million pairs at the CIFAR-100 default — so --max_pairs caps the
-    work per iteration, at the cost of the certificate.
-    """
-    n = traj[0][0].shape[0]
-    ones = torch.ones(n, device=device)
-    c_sum = weighted_kernel_mv(traj, ones)
-    d = kernel_diagonal(traj)
-
-    g = torch.Generator()
+    n, factor_device = _validate_factored_swap_problem(
+        traj, m, max_iters, log_freq=log_freq,
+        max_pairs=max_pairs, batch_pairs=batch_pairs)
+    g = torch.Generator(device='cpu')
     if seed is not None:
         g.manual_seed(seed)
-    perm = torch.randperm(n, generator=g).to(device)
-    alpha = torch.zeros(n, device=device)
-    alpha[perm[:m]] = 1.0
-    h = compute_h(traj, alpha, m, n, c_sum)
+    selected = torch.zeros(n, dtype=torch.bool, device=factor_device)
+    selected[torch.randperm(n, generator=g)[:m].to(factor_device)] = True
+    centered, constant = _centered_state(traj, torch.where(selected)[0], m)
 
-    objective_history = []
-    reason, t = 'max_iters', 0
-    examined_total = 0
+    history = []
+    swaps = pair_searches = states_evaluated = examined_total = 0
+    reason, final_change = 'max_iters', None
+    last_accepted_change = None
+    best_lower_bound = -float('inf')
+    final_D = final_objective = final_gamma = final_certificate = float('nan')
+    all_pair_searches_exact = True
+    one_swap_local_optimum = False
+    r = min(m, n - m)
 
-    for t in range(max_iters):
-        if t % log_freq == 0:
-            objective_history.append({"iteration": t,
-                                      "objective": objective(h, c_sum, alpha, m, n)})
-
-        sel = torch.where(alpha == 1.0)[0]
-        uns = torch.where(alpha == 0.0)[0]
+    while True:
+        D = _centered_D(traj, centered, m)
+        h = _centered_gradient(traj, centered, m)
+        states_evaluated += 1
+        sel, uns = torch.where(selected)[0], torch.where(~selected)[0]
         drop = sel[torch.argsort(h[sel], descending=True)]
         add = uns[torch.argsort(h[uns])]
+        final_gamma = float((h[drop[0]] - h[add[0]]).item())
+        best_lower_bound = max(best_lower_bound,
+                               D - r * max(final_gamma, 0.0))
+        final_certificate = max(0.0, D - best_lower_bound)
+        final_D, final_objective = D, D - constant
+        record = _state_record('best', swaps, pair_searches, D, constant,
+                               final_gamma, best_lower_bound, final_certificate)
+        if swaps % log_freq == 0:
+            history.append(record)
+        final_change = None
+
+        if swaps >= max_iters:
+            reason = 'max_iters'
+            break
+
         pairs = common.ranked_pairs(drop.cpu().numpy(), h[drop].cpu().numpy(),
                                     add.cpu().numpy(), h[add].cpu().numpy())
-
-        best, best_pair, examined, exhausted = 0.0, None, 0, True
+        best, best_pair, examined = float('inf'), None, 0
+        search_complete = False
+        total_pairs = int(sel.numel() * uns.numel())
         buf_lin, buf_i, buf_j = [], [], []
 
         def flush():
             nonlocal best, best_pair
             if not buf_i:
                 return
-            ii = torch.tensor(buf_i, device=device)
-            jj = torch.tensor(buf_j, device=device)
-            delta = (torch.tensor(buf_lin, device=device)
-                     + (d[ii] + d[jj] - 2.0 * kernel_pairs(traj, ii, jj)) / m ** 2)
+            delta = _pair_changes_fp64(
+                traj, centered, m, buf_i, buf_j, linear_terms=buf_lin)
             k = int(torch.argmin(delta))
             if float(delta[k]) < best:
                 best, best_pair = float(delta[k]), (buf_i[k], buf_j[k])
-            buf_lin.clear(); buf_i.clear(); buf_j.clear()
+            buf_lin.clear()
+            buf_i.clear()
+            buf_j.clear()
 
         for lin, i, j in pairs:
-            # Curvature is >= 0, so every unexamined pair has
-            # Delta >= lin >= this lin. Once that cannot beat `best`,
-            # the search is provably done.
             if lin >= best:
                 flush()
                 if lin >= best:
+                    search_complete = True
                     break
-            buf_lin.append(lin); buf_i.append(i); buf_j.append(j)
+            buf_lin.append(lin)
+            buf_i.append(i)
+            buf_j.append(j)
             examined += 1
             if len(buf_i) >= batch_pairs:
                 flush()
             if max_pairs and examined >= max_pairs:
                 flush()
-                exhausted = False
+                search_complete = examined == total_pairs
                 break
+        else:
+            search_complete = True
         flush()
+        pair_searches += 1
         examined_total += examined
+        all_pair_searches_exact &= search_complete
+        final_change = None if best_pair is None else best
 
-        if best_pair is None:
-            reason = ('no improving swap exists (exact)' if exhausted
-                      else f'no improving swap in the {examined} best-ranked pairs '
-                           f'(--max_pairs, not certified)')
+        if best_pair is None or best >= 0.0:
+            if search_complete:
+                reason = 'no improving swap exists (exact one-swap local optimum)'
+                one_swap_local_optimum = True
+            else:
+                reason = (f'no improving swap in the {examined} best-ranked pairs '
+                          f'(--max_pairs, not a local-optimality certificate)')
             break
 
         i_t, j_t = best_pair
-        alpha[i_t] = 0.0
-        alpha[j_t] = 1.0
-        h = compute_h(traj, alpha, m, n, c_sum)
-        if logger and (t % log_freq == 0):
-            logger.info(f"iter {t}: best exact change {best:.6e} "
-                        f"({examined} pairs screened of {len(sel) * len(uns)})")
+        _apply_centered_swap(traj, centered, i_t, j_t)
+        selected[i_t], selected[j_t] = False, True
+        swaps += 1
+        last_accepted_change = best
+        if logger and ((swaps - 1) % log_freq == 0):
+            qualifier = 'exact' if search_complete else 'truncated'
+            logger.info(f"swap {swaps}: best {qualifier} change {best:.6e} "
+                        f"({examined} pairs screened of {total_pairs})")
 
-    objective_history.append({"iteration": t,
-                              "objective": objective(h, c_sum, alpha, m, n)})
-    diag = {"rule": "best", "iterations": t, "swaps": t, "reason": reason,
-            "pairs_screened": examined_total,
-            "objective": objective_history[-1]["objective"]}
-    return torch.where(alpha == 1.0)[0].cpu(), objective_history, diag
+    globally_optimal = final_gamma <= 0.0
+    one_swap_local_optimum |= globally_optimal
+    final_record = _state_record('best', swaps, pair_searches, final_D, constant,
+                                 final_gamma, best_lower_bound, final_certificate)
+    final_record.update({"final": True, "change": final_change, "reason": reason})
+    if not history or history[-1].get("iteration") != swaps:
+        history.append(final_record)
+    else:
+        history[-1].update(final_record)
+
+    diag = {"algorithm": 2, "rule": "best", "iterations": swaps,
+            "pair_searches": pair_searches, "states_evaluated": states_evaluated,
+            "swaps": swaps, "reason": reason, "pairs_screened": examined_total,
+            "final_change": final_change,
+            "last_accepted_change": last_accepted_change,
+            "final_gamma": final_gamma,
+            "D": final_D, "objective": final_objective,
+            "lower_bound": best_lower_bound, "certificate": final_certificate,
+            "certificate_valid": True, "globally_optimal": globally_optimal,
+            "one_swap_local_optimum": one_swap_local_optimum,
+            "all_pair_searches_exact": all_pair_searches_exact,
+            "algorithm_2_exact": max_pairs == 0 and all_pair_searches_exact,
+            "decision_dtype": "float64", "centered_acceptance": True}
+    return torch.where(selected)[0].cpu(), history, diag
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,7 +670,9 @@ def main():
     p.add_argument('--fraction',       default=0.3,         type=float)
     p.add_argument('--seed', '-seed',   default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str)
-    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset',        default='cifar100',  choices=list(common.DATASETS))
+    p.add_argument('--architecture',   default=None, choices=list(common.ARCHITECTURES),
+                   help='Network architecture. Defaults to resnet18, or lenet for MNIST.')
     p.add_argument('--data_dir',       required=True,       type=str,
                    help='Root of the staged dataset (e.g. $SLURM_TMPDIR/cifar100_data)')
     p.add_argument('--proj_dim',       default=0,           type=int,
@@ -558,14 +769,25 @@ def main():
             'adam' if use_metric or args.optimizer in ('adam', 'adam_update') else 'sgd')
 
     # ── 0. Dataset ───────────────────────────────────────────────────────────
-    cfg         = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg         = common.get_dataset_config(
+        args.dataset, args.data_dir, download=args.download,
+        architecture=args.architecture)
     NUM_CLASSES = cfg['num_classes']
     NUM_EPOCHS  = cfg['num_epochs']
-    FEAT_DIM    = 512           # ResNet18 penultimate layer width
 
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     budget  = int(args.fraction * n_train)
+    if not 1 <= budget < n_train:
+        raise ValueError(
+            f"--fraction={args.fraction!r} gives budget={budget}; require "
+            f"1 <= budget < n_train={n_train}."
+        )
+    trainset, _ = random_split(
+        cfg['full_train'], [n_train, n_val],
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
 
     # ── 1. Resolve checkpoint trajectory ─────────────────────────────────────
     #      Before any file naming below, so the saved names can record how
@@ -578,7 +800,10 @@ def main():
         epochs=args.checkpoint_epochs, n_train=n_train, batch_size=args.batch_size,
         base_lr=args.ref_lr, num_epochs=NUM_EPOCHS, beta1=args.beta1,
         momentum=args.momentum_response, metric=args.metric,
-        checkpoint_weighting=args.checkpoint_weighting)
+        checkpoint_weighting=args.checkpoint_weighting,
+        expected_dataset=args.dataset, expected_seed=args.seed,
+        expected_architecture=cfg['architecture'],
+        expected_pool_indices_sha256=pool_indices_sha256)
     num_ckpts_used = len(checkpoints)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
@@ -592,7 +817,7 @@ def main():
     # The inferred method name keeps objective/algorithm ablations from
     # silently overwriting one another while retaining the historical name
     # for the default uniform/ranked/exact configuration.
-    method = 'kl_faithful' + ref.objective_tag(
+    method = f"kl_faithful_{cfg['architecture']}" + ref.objective_tag(
         args.optimizer, args.metric, args.checkpoint_weighting,
         args.momentum_response)
     if args.rule != 'ranked':
@@ -603,7 +828,46 @@ def main():
         method += '_nobias'
     if args.scoring_transform != 'test':
         method += f'_{args.scoring_transform}view'
-    file_prefix = f"{method}_{budget}_K{num_ckpts_used}"
+    if manifest is not None:
+        trajectory_identity = {
+            'manifest_run_id': manifest.get('run_id'),
+            'manifest_fingerprint': common.config_fingerprint(manifest),
+        }
+    else:
+        trajectory_identity = {
+            'legacy_directory': os.path.realpath(args.checkpoint_dir),
+            'files': [
+                {
+                    'path': os.path.realpath(c.path),
+                    'size': os.stat(c.path).st_size,
+                    'mtime_ns': os.stat(c.path).st_mtime_ns,
+                }
+                for c in checkpoints
+            ],
+        }
+    run_config = {
+        'schema_version': 2,
+        'selector': 'kl_factored',
+        'arguments': {**vars(args),
+                      'checkpoint_dir': os.path.realpath(args.checkpoint_dir),
+                      'data_dir': os.path.realpath(args.data_dir),
+                      'init_ckpt': (os.path.realpath(args.init_ckpt)
+                                    if args.init_ckpt else None)},
+        'resolved': {
+            'dataset': args.dataset, 'architecture': cfg['architecture'],
+            'n_train': n_train, 'budget': budget,
+            'pool_indices_sha256': pool_indices_sha256,
+            'trajectory': trajectory_identity,
+            'checkpoints': [
+                {'path': os.path.realpath(c.path), 'epoch': c.epoch,
+                 'step': c.step, 'lr': c.lr, 'weight': c.weight,
+                 'window': list(c.window)}
+                for c in checkpoints
+            ],
+        },
+    }
+    run_id = common.config_fingerprint(run_config)
+    file_prefix = f"{method}_{budget}_K{num_ckpts_used}_cfg{run_id}"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -614,8 +878,10 @@ def main():
         ],
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
+    logger.info(f"Dataset={args.dataset}  architecture={cfg['architecture']}  "
+                f"budget={budget}  seed={args.seed}  "
                 f"device={'cuda' if torch.cuda.is_available() else 'cpu'}")
+    logger.info(f"Immutable run fingerprint: {run_id}")
     logger.info(f"Trajectory: {ckpt_description}"
                 + ("" if manifest else "  (legacy dir, eta_s reconstructed from the "
                                         "cosine schedule)"))
@@ -645,23 +911,42 @@ def main():
     METRICS_SAVE_PATH = os.path.join(base_dir, f"{file_prefix}_metrics.json")
     OBJ_SAVE_PATH     = os.path.join(base_dir, f"{file_prefix}_objective.json")
     TIMING_SAVE_PATH  = os.path.join(base_dir, f"{file_prefix}_timing.json")
+    RUN_SAVE_PATH     = os.path.join(base_dir, f"{file_prefix}_run.json")
+    if args.selection_only:
+        stale = [path for path in (MODEL_SAVE_PATH, METRICS_SAVE_PATH)
+                 if os.path.exists(path)]
+        if stale:
+            raise FileExistsError(
+                "Refusing --selection_only because retraining artifacts already exist "
+                f"for this exact run: {stale}. Remove them explicitly or change the "
+                "configuration.")
+    common.atomic_json_dump(
+        {'schema_version': 1, 'run_id': run_id, 'status': 'configured',
+         'config': run_config}, RUN_SAVE_PATH)
 
     # ── 3. Scoring pool ──────────────────────────────────────────────────────
     #      Materialised once: a dataloader under the 'train' transform
     #      redraws the augmentation on every pass, so each checkpoint would
     #      see a different view of the same example and P would mix
     #      gradients taken at different inputs.
-    trainset, _ = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
     X, Y = d_alpha.materialise(common.scoring_subset(cfg, trainset, args.scoring_transform),
                                device, batch_size=BATCH_SIZE, num_workers=args.num_workers)
     testloader  = DataLoader(cfg['testset'], batch_size=BATCH_SIZE, shuffle=False,
                              pin_memory=True, num_workers=args.num_workers)
 
     # ── 4. Reference model ───────────────────────────────────────────────────
-    ref_model = common.build_model(cfg, NUM_CLASSES, device)
+    ref_model = common.build_model(
+        cfg, NUM_CLASSES, device, architecture=cfg['architecture'])
+    FEAT_DIM = common.feature_dim(ref_model)
+    uses_batchnorm = any(
+        isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
+        for module in ref_model.modules())
+    if uses_batchnorm:
+        logger.warning(
+            "The model contains BatchNorm. Selection scores per-example gradients "
+            "with frozen running statistics (model.eval()); this is a reproducible "
+            "surrogate, not the train-mode BatchNorm gradient field that produced "
+            "the reference trajectory.")
 
     # ── 5. JL matrices ───────────────────────────────────────────────────────
     k = args.proj_dim
@@ -708,7 +993,8 @@ def main():
                 seed=args.seed, max_pairs=args.max_pairs,
                 batch_pairs=args.batch_pairs, logger=logger,
             )
-    logger.info(f"Stopped after {diag['iterations']} iterations ({diag['reason']}), "
+    logger.info(f"Stopped after {diag['swaps']} accepted swaps and "
+                f"{diag['pair_searches']} pair searches ({diag['reason']}), "
                 f"{len(selected_indices)} samples selected. "
                 f"f: {objective_history[0]['objective']:.6e} -> "
                 f"{objective_history[-1]['objective']:.6e}")
@@ -717,12 +1003,15 @@ def main():
                        "is the best found, not a local optimum.")
 
     common.save_timing(TIMING_SAVE_PATH, timer, logger, method=method,
+                       run_id=run_id,
                        reference_epochs_used=max(c.epoch for c in checkpoints),
                        swap_iterations=diag['iterations'],
                        objective_optimizer=args.optimizer,
                        objective_metric='D_k^2' if use_metric else 'I',
                        momentum_response=args.momentum_response,
                        scoring_transform=args.scoring_transform,
+                       batchnorm_scoring_mode=('eval_frozen' if uses_batchnorm else 'none'),
+                       train_mode_gradient_correspondence=not uses_batchnorm,
                        include_bias=args.include_bias,
                        checkpoint_selection=args.checkpoint_selection,
                        checkpoint_weighting=args.checkpoint_weighting,
@@ -731,9 +1020,15 @@ def main():
                        num_checkpoints_used=num_ckpts_used,
                        **{k_: v for k_, v in diag.items() if k_ != 'iterations'})
     torch.save(selected_indices, INDICES_SAVE_PATH)
-    with open(OBJ_SAVE_PATH, 'w') as fh:
-        json.dump(objective_history, fh, indent=4)
+    common.atomic_json_dump(objective_history, OBJ_SAVE_PATH)
     if args.selection_only:
+        common.atomic_json_dump(
+            {'schema_version': 1, 'run_id': run_id,
+             'status': 'selection_complete', 'config': run_config,
+             'artifacts': {'indices': INDICES_SAVE_PATH,
+                           'objective': OBJ_SAVE_PATH,
+                           'timing': TIMING_SAVE_PATH}},
+            RUN_SAVE_PATH)
         logger.info("--selection_only set: skipping retraining.")
         return
 
@@ -742,12 +1037,16 @@ def main():
     if device == 'cuda':
         torch.cuda.empty_cache()
 
+    train_generator = torch.Generator().manual_seed(args.seed + 10_000)
     trainloader = DataLoader(
         Subset(trainset, selected_indices),
         batch_size=BATCH_SIZE, shuffle=True, pin_memory=True, num_workers=args.num_workers,
+        generator=train_generator,
     )
 
-    model = common.build_model(cfg, NUM_CLASSES, device)
+    common.set_seed(args.seed)
+    model = common.build_model(
+        cfg, NUM_CLASSES, device, architecture=cfg['architecture'])
     logger.info(common.load_or_create_init(model, args.init_ckpt, logger))
 
     criterion = nn.CrossEntropyLoss()
@@ -786,8 +1085,14 @@ def main():
 
     # ── 9. Save ───────────────────────────────────────────────────────────────
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
-    with open(METRICS_SAVE_PATH, 'w') as fh:
-        json.dump(accuracy_history, fh, indent=4)
+    common.atomic_json_dump(accuracy_history, METRICS_SAVE_PATH)
+    common.atomic_json_dump(
+        {'schema_version': 1, 'run_id': run_id, 'status': 'complete',
+         'config': run_config,
+         'artifacts': {'indices': INDICES_SAVE_PATH, 'objective': OBJ_SAVE_PATH,
+                       'timing': TIMING_SAVE_PATH, 'model': MODEL_SAVE_PATH,
+                       'metrics': METRICS_SAVE_PATH}},
+        RUN_SAVE_PATH)
     logger.info(f"Saved all artefacts to {base_dir}")
 
 

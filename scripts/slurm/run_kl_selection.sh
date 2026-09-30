@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=imagenet_kl_selection
-#SBATCH --output=logs/new_kl_select_truncated_cifar100_%A_%a.txt
-#SBATCH --error=logs/new_kl_select_truncated_cifar100_%A_%a.txt
-#SBATCH --array=0-19                 # 20 tasks = 1 dataset (ImageNet) × 4 fractions × 5 seeds
+#SBATCH --job-name=kl_selection
+#SBATCH --output=kl_selection_%A_%a.txt
+#SBATCH --error=kl_selection_%A_%a.txt
+#SBATCH --array=0-19                 # 20 tasks = 1 dataset × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
 #SBATCH --time=15:00:00
@@ -22,11 +22,12 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
-DATASET="cifar100"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
+DATASET="cifar100"  # Override with DATASET_OVERRIDE (cifar10/cifar100/mnist/imagenet)
+ARCHITECTURE="${ARCHITECTURE:-resnet18}"
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 
-MAX_ITERS=2000
+MAX_ITERS="${MAX_ITERS:-2000}"
 BATCH_SIZE=128
 LR=0.01
 NUM_WORKERS=4
@@ -50,11 +51,14 @@ CHECKPOINT_WEIGHTING="${CHECKPOINT_WEIGHTING:-point}"
 # A short prefix sits on an almost-flat part of the cosine schedule, so the
 # default spreads checkpoints over the run. Adam needs an optimizer-aware
 # trajectory; point CHECKPOINT_DIR at the output of scripts/train/reference.py.
-OPTIMIZER="${OPTIMIZER:-uniform}"
+OPTIMIZER="${OPTIMIZER:-sgd}"
 METRIC="${METRIC:-auto}"          # auto | none | adam
 # 'ranked' is Algorithm 3 (stops at its first rejected top-ranked pair);
 # 'best' is the exact best-swap search with screening.
 RULE="${RULE:-ranked}"
+MAX_PAIRS="${MAX_PAIRS:-0}"       # 0 is exhaustive/certifying for --rule best
+SCORING_TRANSFORM="${SCORING_TRANSFORM:-test}"
+RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-}"
 # Shared retraining initialisation (per seed, set below once SEED is known):
 # the first run writes it and the rest load it, so two selectors are compared
 # from the same weights. Set INIT_CKPT_DIR="" to opt out.
@@ -74,15 +78,18 @@ SEED=${SEEDS[$SEED_IDX]}
 
 INIT_ARGS=()
 if [ -n "$INIT_CKPT_DIR" ]; then
-    INIT_ARGS=(--init_ckpt "${INIT_CKPT_DIR}/${DATASET}_seed${SEED}.pth")
+    INIT_ARGS=(--init_ckpt "${INIT_CKPT_DIR}/${DATASET}_${ARCHITECTURE}_seed${SEED}.pth")
 fi
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
-mkdir -p "$CHECKPOINT_DIR"
+if [ ! -d "$CHECKPOINT_DIR" ]; then
+    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
+    exit 1
+fi
 
 # ── Stage & Extract Dataset onto Node-Local SSD ($SLURM_TMPDIR) ───────────────
 source "${SCRIPT_DIR}/stage_dataset.sh"
@@ -91,6 +98,7 @@ stage_dataset "$DATASET" "$LOCAL_DATA"
 echo "=================================================="
 echo " SLURM Array Task ID : $SLURM_ARRAY_TASK_ID"
 echo " Dataset             : $DATASET"
+echo " Architecture        : $ARCHITECTURE"
 echo " Fraction            : $FRACTION"
 echo " Seed                : $SEED"
 echo " Checkpoint Dir      : $CHECKPOINT_DIR"
@@ -98,6 +106,8 @@ echo " Num Checkpoints (K) : $NUM_CHECKPOINTS ($CHECKPOINT_SELECTION)"
 echo " Checkpoint Weighting: $CHECKPOINT_WEIGHTING"
 echo " Objective           : $OPTIMIZER (metric=$METRIC)"
 echo " Swap rule           : $RULE"
+echo " Max pairs           : $MAX_PAIRS"
+echo " Scoring transform   : $SCORING_TRANSFORM"
 echo " Shared init         : ${INIT_ARGS[1]:-none}"
 echo " Local Data Dir      : $LOCAL_DATA"
 echo " Max Iterations      : $MAX_ITERS"
@@ -108,8 +118,14 @@ echo "--------------------------------------------------"
 echo " Running KL-Faithful Selection | dataset=$DATASET | fraction=$FRACTION | seed=$SEED | K=$NUM_CHECKPOINTS"
 echo "--------------------------------------------------"
 
+RETRAIN_ARGS=()
+if [ -n "$RETRAIN_OPTIMIZER" ]; then
+    RETRAIN_ARGS=(--retrain_optimizer "$RETRAIN_OPTIMIZER")
+fi
+
 srun python "${PROJECT_ROOT}/scripts/select/kl.py" \
     --dataset "$DATASET" \
+    --architecture "$ARCHITECTURE" \
     --fraction "$FRACTION" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
@@ -120,10 +136,14 @@ srun python "${PROJECT_ROOT}/scripts/select/kl.py" \
     --optimizer "$OPTIMIZER" \
     --metric "$METRIC" \
     --rule "$RULE" \
+    --max_pairs "$MAX_PAIRS" \
     --max_iters "$MAX_ITERS" \
     --batch_size "$BATCH_SIZE" \
     --lr "$LR" \
     --num_workers "$NUM_WORKERS" \
+    --download \
+    --scoring_transform "$SCORING_TRANSFORM" \
+    "${RETRAIN_ARGS[@]}" \
     "${INIT_ARGS[@]}"
 
 echo ""
