@@ -290,8 +290,9 @@ python scripts/select/submodular.py \
   --function graphcut --kernel features
 ```
 
-Other entry points are `moderate.py`, `el2n.py`, `moso.py`, and `gradmatch.py`
-under `scripts/select/`.
+Other entry points are `moderate.py`, `el2n.py`, and `moso.py` under
+`scripts/select/`. (`gradmatch.py` remains for legacy CORDS-based runs and
+requires a separate `cords` install.)
 
 ## Aggregate, score, and plot
 
@@ -342,13 +343,17 @@ repository from the directory `sbatch` was called in (`SLURM_SUBMIT_DIR`) and
 set `PYTHONPATH` automatically. Submit from anywhere inside the repository, or
 export `PROJECT_ROOT=/path/to/data_selection_swap` when submitting elsewhere:
 
+Launchers activate the **`kl_select`** conda environment by default (`module
+load miniconda/3` on Mila). Override with `CONDA_ENV=other_env sbatch ...` when
+needed. Install dependencies with `pip install -r requirements.txt` inside that
+environment (Python 3.9+, PyTorch 2.0+ for full-network KL).
+
 ```bash
 sbatch scripts/slurm/run_full_data.sh
 sbatch scripts/slurm/run_kl_selection.sh
 sbatch scripts/slurm/run_kl_full_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
-sbatch scripts/slurm/run_gradmatch_selection.sh
 
 # Controlled multi-stage suites (submitters add strict afterok dependencies)
 scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json

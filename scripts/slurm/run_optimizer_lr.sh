@@ -30,7 +30,7 @@ if command -v module >/dev/null 2>&1; then
 fi
 if command -v conda >/dev/null 2>&1; then
     set +u
-    conda activate "${OPT_LR_CONDA_ENV:-gradmatch}"
+    conda activate "${OPT_LR_CONDA_ENV:-${CONDA_ENV:-kl_select}}"
     set -u
 fi
 

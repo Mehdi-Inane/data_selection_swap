@@ -131,6 +131,11 @@ second is the honest cost when no full-data model exists yet.
 
 ## 7. Running
 
+Slurm launchers default to the **`kl_select`** conda environment on Mila
+(`CONDA_ENV=kl_select`; override with `CONDA_ENV=...` when submitting). Use
+Python 3.9+ and PyTorch 2.0+ so full-network KL (`kl_full`) can import
+`torch.func`.
+
 ```bash
 # General exploratory paths
 sbatch scripts/slurm/run_full_data.sh

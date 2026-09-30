@@ -28,7 +28,7 @@ if command -v module >/dev/null 2>&1; then
 fi
 if command -v conda >/dev/null 2>&1; then
     set +u
-    conda activate "${SWAP_RULE_CONDA_ENV:-gradmatch}"
+    conda activate "${SWAP_RULE_CONDA_ENV:-${CONDA_ENV:-kl_select}}"
     set -u
 fi
 
