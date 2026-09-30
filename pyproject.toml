@@ -7,7 +7,7 @@ name = "data-selection-swap"
 version = "0.1.0"
 description = "Faithful data selection with trajectory-weighted gradient matching"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 
 [tool.setuptools.packages.find]
 where = ["src"]
