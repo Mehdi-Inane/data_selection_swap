@@ -15,6 +15,8 @@ Coreset / GraphCut / Facility Location's use of a single converged
 embedding).
 """
 
+from __future__ import annotations
+
 import copy
 import fcntl
 import glob
