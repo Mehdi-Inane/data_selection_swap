@@ -359,8 +359,7 @@ class ObjectiveScorer:
         """D_alpha for the subset saved at indices_path, scored on (seed, k)'s trajectory."""
         trajectory, c_sum, n_train = self.trajectory(seed, k)
 
-        indices = self.torch.load(
-            indices_path, map_location='cpu', weights_only=False)
+        indices = self.sc.torch_load(indices_path, map_location='cpu')
         indices = self.torch.as_tensor(indices, dtype=self.torch.long)
         m = int(indices.numel())
         if m == 0:

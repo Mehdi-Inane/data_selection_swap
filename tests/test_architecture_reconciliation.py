@@ -88,3 +88,33 @@ def test_baseline_paths_are_architecture_scoped(tmp_path, monkeypatch):
     assert resnet["base_dir"] != vgg["base_dir"]
     assert "resnet18" in resnet["base_dir"]
     assert "vgg16" in vgg["base_dir"]
+
+
+def test_torchvision_model_supports_legacy_pretrained_kw():
+    def modern(**kwargs):
+        if "pretrained" in kwargs:
+            raise TypeError("unexpected keyword argument 'pretrained'")
+        return ("modern", kwargs)
+
+    def legacy(**kwargs):
+        if "weights" in kwargs:
+            raise TypeError("unexpected keyword argument 'weights'")
+        return ("legacy", kwargs)
+
+    assert common._torchvision_model(modern) == ("modern", {})
+    assert common._torchvision_model(legacy) == ("legacy", {"pretrained": False})
+
+
+def test_torch_load_supports_legacy_api(tmp_path, monkeypatch):
+    path = tmp_path / "tensor.pt"
+    tensor = torch.tensor([1.0, 2.0])
+    torch.save(tensor, path)
+    real_load = torch.load
+
+    def legacy_load(path, map_location="cpu", **kwargs):
+        if "weights_only" in kwargs:
+            raise TypeError("unexpected keyword argument 'weights_only'")
+        return real_load(path, map_location=map_location)
+
+    monkeypatch.setattr(common.torch, "load", legacy_load)
+    assert torch.equal(common.torch_load(path), tensor)
