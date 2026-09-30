@@ -478,7 +478,9 @@ def torch_load(path, *, map_location='cpu'):
     try:
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError as exc:
-        if "unexpected keyword argument 'weights_only'" not in str(exc):
+        # Older torch rejects the kwarg; some 1.x builds accept it but fail in
+        # Unpickler with "'weights_only' is an invalid keyword argument ...".
+        if "weights_only" not in str(exc):
             raise
         return torch.load(path, map_location=map_location)
 
