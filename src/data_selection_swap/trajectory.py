@@ -177,7 +177,7 @@ class Checkpoint:
 #   adam objective actually requires a re-run.
 # ─────────────────────────────────────────────────────────────────────────────
 def load_record(path):
-    obj = torch.load(path, map_location='cpu', weights_only=False)
+    obj = common.torch_load(path, map_location='cpu')
     if isinstance(obj, dict) and 'model' in obj:
         return obj
     if isinstance(obj, dict) and 'state_dict' in obj:

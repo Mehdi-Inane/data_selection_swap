@@ -371,8 +371,7 @@ def main():
 
         subsets = {}
         for i, r in enumerate(seed_rows):
-            idx = torch.load(
-                r['indices_path'], map_location='cpu', weights_only=False)
+            idx = common.torch_load(r['indices_path'], map_location='cpu')
             idx = torch.as_tensor(idx, dtype=torch.long).reshape(-1)
             if idx.unique().numel() != idx.numel():
                 logger.warning(f"{r['indices_path']} contains duplicate indices; "

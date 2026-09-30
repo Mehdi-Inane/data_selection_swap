@@ -176,7 +176,7 @@ class TorchvisionResNet(nn.Module):
                  small_images: bool):
         super().__init__()
         constructor = {18: tv_models.resnet18, 34: tv_models.resnet34}[depth]
-        self.backbone = constructor(weights=None)
+        self.backbone = _torchvision_model(constructor)
         if small_images:
             self.backbone.conv1 = nn.Conv2d(
                 in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
@@ -302,6 +302,16 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
 # ─────────────────────────────────────────────────────────────────────────────
 # Model construction, including the shared CIFAR stem
 # ─────────────────────────────────────────────────────────────────────────────
+def _torchvision_model(constructor, **kwargs):
+    """Call a torchvision model builder on modern (weights=) and legacy APIs."""
+    try:
+        return constructor(weights=None, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'weights'" not in str(exc):
+            raise
+        return constructor(pretrained=False, **kwargs)
+
+
 def build_model(cfg: dict, num_classes: int, device: str,
                 architecture: str = None) -> nn.Module:
     """Build a supported network with a common ``linear`` classifier API."""
@@ -312,7 +322,7 @@ def build_model(cfg: dict, num_classes: int, device: str,
     if architecture == 'resnet18':
         # Use the raw torchvision layout so origin/main checkpoints load
         # strictly without key rewriting.
-        model = tv_models.resnet18(weights=None, num_classes=num_classes)
+        model = _torchvision_model(tv_models.resnet18, num_classes=num_classes)
         if small_images:
             model.conv1 = nn.Conv2d(
                 in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
@@ -321,7 +331,7 @@ def build_model(cfg: dict, num_classes: int, device: str,
             model.conv1 = nn.Conv2d(
                 in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
     elif architecture == 'vgg16':
-        model = tv_models.vgg16_bn(weights=None, num_classes=num_classes)
+        model = _torchvision_model(tv_models.vgg16_bn, num_classes=num_classes)
         if in_channels != 3:
             model.features[0] = nn.Conv2d(
                 in_channels, 64, kernel_size=3, stride=1, padding=1)
@@ -332,9 +342,12 @@ def build_model(cfg: dict, num_classes: int, device: str,
                 nn.Linear(512, num_classes),
             )
     elif architecture == 'inception':
-        model = tv_models.googlenet(
-            weights=None, aux_logits=False, init_weights=True,
-            num_classes=num_classes)
+        model = _torchvision_model(
+            tv_models.googlenet,
+            aux_logits=False,
+            init_weights=True,
+            num_classes=num_classes,
+        )
         if small_images:
             model.conv1 = BasicConv2d(
                 in_channels, 64, kernel_size=3, stride=1, padding=1)
@@ -460,6 +473,16 @@ def ranked_pairs(drop_idx, drop_h, add_idx, add_h):
 # ─────────────────────────────────────────────────────────────────────────────
 # Checkpoints
 # ─────────────────────────────────────────────────────────────────────────────
+def torch_load(path, *, map_location='cpu'):
+    """Load a checkpoint on both legacy and modern PyTorch torch.load APIs."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError as exc:
+        if "unexpected keyword argument 'weights_only'" not in str(exc):
+            raise
+        return torch.load(path, map_location=map_location)
+
+
 def list_checkpoints(checkpoint_dir: str):
     if not os.path.isdir(checkpoint_dir):
         raise ValueError(f"Checkpoint directory not found: {checkpoint_dir}")
@@ -471,7 +494,7 @@ def list_checkpoints(checkpoint_dir: str):
 
 def load_model_weights(path: str, map_location='cpu'):
     """Load weights from either a bare state dict or a reference record."""
-    obj = torch.load(path, map_location=map_location, weights_only=False)
+    obj = torch_load(path, map_location=map_location)
     if isinstance(obj, dict) and 'model' in obj:
         return obj['model']
     if isinstance(obj, dict) and 'state_dict' in obj:
@@ -542,8 +565,7 @@ def load_or_create_init(model: nn.Module, path, logger=None) -> str:
     with open(lock_path, 'a+b') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if os.path.exists(path):
-            model.load_state_dict(torch.load(
-                path, map_location=device, weights_only=False))
+            model.load_state_dict(torch_load(path, map_location=device))
             note = f"initialisation loaded from {path}"
         else:
             tmp = f"{path}.tmp.{os.getpid()}"
