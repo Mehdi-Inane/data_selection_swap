@@ -140,7 +140,8 @@ def correlations(scored, fractions, seeds):
             pooled_d.extend(ds - ds.mean())
             pooled_a.extend(accs - accs.mean())
         per_fraction[fraction] = dict(
-            within_seed=(float(np.nanmean(within)), float(np.nanstd(within))) if within
+            within_seed=(float(np.nanmean(within)),
+                         float(np.nanstd(within, ddof=1 if len(within) > 1 else 0))) if within
             else (float('nan'), float('nan')),
             n_seeds=len(within),
             pooled_centred=_spearman(pooled_d, pooled_a),
@@ -174,7 +175,10 @@ def aggregate(scored):
 
 
 def _mean_std(values):
-    return (float(np.mean(values)), float(np.std(values))) if values else (float('nan'),) * 2
+    if not values:
+        return (float('nan'),) * 2
+    return (float(np.mean(values)),
+            float(np.std(values, ddof=1 if len(values) > 1 else 0)))
 
 
 def print_table(agg, logger):
@@ -207,7 +211,7 @@ def print_correlations(corr, logger):
                     f"{c['pooled_centred']:<20.3f}{c['n_points']:<5}")
 
 
-def write_csv(path, scored, trajectory):
+def write_csv(path, scored):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', newline='') as fh:
         w = csv.writer(fh)
@@ -219,7 +223,7 @@ def write_csv(path, scored, trajectory):
                         r['k'] if r['k'] is not None else '', r['seed'],
                         '' if r['acc'] is None else r['acc'],
                         r['d'], r['d_rel'], r['e_u_d'],
-                        r.get('indices_path', ''), trajectory])
+                        r.get('indices_path', ''), r.get('trajectory', '')])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,12 +233,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dataset', default='cifar100', choices=list(N_TRAIN))
+    p.add_argument('--architecture', default=None, choices=list(common.ARCHITECTURES))
     p.add_argument('--data_dir', required=True,
                    help='Dataset root. Needs the real images: D is computed from gradients. '
                         'Use a persistent path, not $SLURM_TMPDIR from another job.')
     p.add_argument('--checkpoint_dir', default=None,
-                   help='Reference trajectory. Default: '
-                        '$SCRATCH/data_selection_swap/<dataset>/checkpoints')
+                   help='Reference trajectory directory or a template containing {seed}. '
+                        'Default: $SCRATCH/data_selection_swap/<dataset>/<architecture>/'
+                        'checkpoints/seed_{seed}. A distinct, manifest-validated trajectory '
+                        'is required for every split seed.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
     p.add_argument('--fractions', default=[0.1, 0.2, 0.4, 0.5], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
@@ -292,8 +299,6 @@ def main():
                         handlers=[logging.StreamHandler(sys.stdout)])
     logger = logging.getLogger('score_subsets')
 
-    checkpoint_dir = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, 'checkpoints')
     methods = args.methods or discover_methods(args.scratch, args.dataset)
 
     rows = collect_rows(args.scratch, args.dataset, args.fractions, args.seeds,
@@ -303,32 +308,12 @@ def main():
         return
     logger.info(f"Found {len(rows)} saved subsets across {len(methods)} methods.")
 
-    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                    architecture=args.architecture)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    checkpoints, _, description = ref.resolve(
-        checkpoint_dir, optimizer=args.weighting,
-        num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
-        epochs=args.checkpoint_epochs, n_train=N_TRAIN[args.dataset],
-        base_lr=args.base_lr, num_epochs=cfg['num_epochs'], beta1=args.beta1,
-        momentum=args.momentum_response, metric=args.metric,
-        checkpoint_weighting=args.checkpoint_weighting)
-    ckpt_paths = [c.path for c in checkpoints]
-    weights = [c.weight for c in checkpoints]
-
-    metrics = None
-    if ref.resolve_metric(args.weighting, args.metric):
-        named = list(common.build_model(cfg, cfg['num_classes'], 'cpu').named_parameters())
-        metrics = [ref.adam_metric_flat(c, named, eps=args.adam_eps, power=2).to(device)
-                   for c in checkpoints]
-        scale = max(float(M.mean()) for M in metrics)
-        metrics = [M / scale for M in metrics]
-        logger.info(f"Metric M_k = D_k^2 rescaled by 1/{scale:.4g} "
-                    f"(global; D is in those units, so compare D_rel, not D)")
-
-    trajectory = f"{description}, view={args.scoring_transform}"
-    logger.info(f"Scoring trajectory: {trajectory}")
-    logger.info("\n" + ref.describe(checkpoints))
+    checkpoint_template = args.checkpoint_dir or os.path.join(
+        args.scratch, 'data_selection_swap', args.dataset,
+        cfg['architecture'], 'checkpoints', 'seed_{seed}')
 
     scored = []
 
@@ -339,6 +324,38 @@ def main():
 
         trainset, _, _, n_train = common.make_loaders(
             cfg, seed, args.batch_size, args.num_workers, args.scoring_transform)
+        pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
+        checkpoint_dir = checkpoint_template.format(seed=seed)
+        checkpoints, _, description = ref.resolve(
+            checkpoint_dir, optimizer=args.weighting,
+            num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
+            epochs=args.checkpoint_epochs, n_train=n_train,
+            batch_size=args.batch_size, base_lr=args.base_lr,
+            num_epochs=cfg['num_epochs'], beta1=args.beta1,
+            momentum=args.momentum_response, metric=args.metric,
+            checkpoint_weighting=args.checkpoint_weighting,
+            expected_dataset=args.dataset, expected_seed=seed,
+            expected_architecture=cfg.get('architecture'),
+            expected_pool_indices_sha256=pool_indices_sha256)
+        ckpt_paths = [c.path for c in checkpoints]
+        weights = [c.weight for c in checkpoints]
+
+        metrics = None
+        if ref.resolve_metric(args.weighting, args.metric):
+            named = list(common.build_model(
+                cfg, cfg['num_classes'], 'cpu').named_parameters())
+            metrics = [
+                ref.adam_metric_flat(c, named, eps=args.adam_eps, power=2).to(device)
+                for c in checkpoints]
+            scale = max(float(M.mean()) for M in metrics)
+            metrics = [M / scale for M in metrics]
+            logger.info(f"Metric M_k = D_k^2 rescaled by 1/{scale:.4g} "
+                        f"(global; D is in those units, so compare D_rel, not D)")
+
+        trajectory = f"{description}, view={args.scoring_transform}, seed={seed}"
+        logger.info(f"Scoring trajectory: {trajectory}")
+        logger.info("\n" + ref.describe(checkpoints))
+
         scorer = d_alpha.TrajectoryScorer(
             cfg, trainset, ckpt_paths, weights, device,
             scoring_transform=args.scoring_transform, batch_size=args.batch_size,
@@ -373,6 +390,7 @@ def main():
         for i, r in enumerate(seed_rows):
             d = values[('run', i)]
             scored.append({**r, 'd': d, 'e_u_d': e_u_d[r['fraction']],
+                           'trajectory': trajectory,
                            'd_rel': d / e_u_d[r['fraction']]})
         for key, value in values.items():
             if key[0] != 'rand':
@@ -382,6 +400,7 @@ def main():
                                budget=int(fraction * N_TRAIN[args.dataset]),
                                method=RANDOM_METHOD, k=None, seed=seed, acc=None,
                                d=value, e_u_d=e_u_d[fraction],
+                               trajectory=trajectory,
                                d_rel=value / e_u_d[fraction]))
 
         del scorer
@@ -393,7 +412,7 @@ def main():
 
     out_csv = args.out_csv or os.path.join(
         args.scratch, 'data_selection_baselines', f'd_alpha_{args.dataset}.csv')
-    write_csv(out_csv, scored, trajectory)
+    write_csv(out_csv, scored)
     logger.info(f"\nPer-subset results → {out_csv}")
 
 

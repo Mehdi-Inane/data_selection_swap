@@ -82,7 +82,8 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # ── 1. Dataset ───────────────────────────────────────────────────────────
-    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                    architecture=args.architecture)
     NUM_CLASSES = cfg['num_classes']
 
     trainset, eval_loader, testloader, n_train = common.make_loaders(

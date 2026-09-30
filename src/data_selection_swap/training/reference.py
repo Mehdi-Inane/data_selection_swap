@@ -76,7 +76,9 @@ def choose_epochs(num_epochs, num_checkpoints, spacing, explicit):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--dataset', default='cifar100', choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset', default='cifar100', choices=list(common.DATASETS))
+    p.add_argument('--architecture', default=None, choices=list(common.ARCHITECTURES),
+                   help='Default: resnet18, or lenet for MNIST.')
     p.add_argument('--data_dir', required=True, type=str)
     p.add_argument('--save_dir', required=True, type=str)
     p.add_argument('--seed', '-seed', default=42, type=int)
@@ -97,6 +99,8 @@ def main():
     p.add_argument('--checkpoint_epochs', default=None, type=int, nargs='+',
                    help='Explicit checkpoint epochs; overrides --num_checkpoints.')
     p.add_argument('--download', action='store_true', default=False)
+    p.add_argument('--resume', action='store_true',
+                   help='Resume from training_state.pth after validating the run config.')
     args = p.parse_args()
 
     common.set_seed(args.seed)
@@ -107,7 +111,8 @@ def main():
                   logging.FileHandler(os.path.join(args.save_dir, 'train.log'))])
     logger = logging.getLogger(__name__)
 
-    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                    architecture=args.architecture)
     num_epochs = args.num_epochs or cfg['num_epochs']
     lr = args.lr if args.lr is not None else (0.01 if args.optimizer == 'sgd' else 1e-3)
 
@@ -115,6 +120,7 @@ def main():
     # selection pool are the same 90%.
     trainset, _, _, n_train = common.make_loaders(
         cfg, args.seed, args.batch_size, args.num_workers)
+    pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
     trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True,
                              pin_memory=True, num_workers=args.num_workers)
 
@@ -130,11 +136,34 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = common.build_model(cfg, cfg['num_classes'], device)
+    initial_state_sha256 = common.state_dict_fingerprint(model.state_dict())
     criterion = nn.CrossEntropyLoss()
     optimizer = ref.build_optimizer(model.parameters(), args.optimizer, lr,
                                     weight_decay=args.weight_decay,
                                     betas=(args.beta1, args.beta2), eps=args.adam_eps)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+    immutable_config = {
+        'schema_version': 2,
+        'dataset': args.dataset,
+        'architecture': cfg['architecture'],
+        'seed': args.seed,
+        'optimizer': args.optimizer,
+        'lr': lr,
+        'weight_decay': args.weight_decay,
+        'betas': [args.beta1, args.beta2],
+        'eps': args.adam_eps,
+        'num_epochs': num_epochs,
+        'batch_size': args.batch_size,
+        'n_train': n_train,
+        'steps_per_epoch': spe,
+        'pool_indices_sha256': pool_indices_sha256,
+        'checkpoint_epochs': ckpt_epochs,
+        'initial_state_sha256': initial_state_sha256,
+    }
+    run_id = common.config_fingerprint(immutable_config)
+    state_path = os.path.join(args.save_dir, 'training_state.pth')
+    manifest_path = os.path.join(args.save_dir, ref.MANIFEST_NAME)
 
     logger.info(f"dataset={args.dataset} optimizer={args.optimizer} lr={lr} "
                 f"epochs={num_epochs} n_train={n_train} steps/epoch={spe} "
@@ -144,8 +173,39 @@ def main():
     names = [n for n, _ in model.named_parameters()]
     epoch_lrs, epoch_seconds, records = [], [], []
     global_step = 0
+    start_epoch = 1
 
-    for epoch in range(1, num_epochs + 1):
+    if args.resume:
+        if not os.path.exists(state_path):
+            raise FileNotFoundError(f"--resume requested but {state_path} does not exist")
+        state = torch.load(state_path, map_location=device)
+        if state.get('run_id') != run_id:
+            raise ValueError(
+                f"Resume config mismatch: requested run {run_id}, state belongs to "
+                f"{state.get('run_id')}. Use a new --save_dir."
+            )
+        model.load_state_dict(state['model'])
+        optimizer.load_state_dict(state['optimizer'])
+        scheduler.load_state_dict(state['scheduler'])
+        start_epoch = int(state['epoch']) + 1
+        global_step = int(state['global_step'])
+        epoch_lrs = list(state['epoch_lrs'])
+        epoch_seconds = list(state['epoch_seconds'])
+        records = list(state['checkpoints'])
+        torch.set_rng_state(state['torch_rng_state'].cpu())
+        if device == 'cuda' and state.get('cuda_rng_state_all') is not None:
+            torch.cuda.set_rng_state_all(state['cuda_rng_state_all'])
+        logger.info(f"Resuming run {run_id} at epoch {start_epoch}")
+    elif os.path.exists(manifest_path):
+        with open(manifest_path) as fh:
+            previous = json.load(fh)
+        if previous.get('checkpoints'):
+            raise FileExistsError(
+                f"{args.save_dir} already contains trajectory artifacts. Refusing to "
+                "mix runs; pass --resume with the identical config or use a new directory."
+            )
+
+    for epoch in range(start_epoch, num_epochs + 1):
         epoch_lr = optimizer.param_groups[0]['lr']
         epoch_lrs.append(float(epoch_lr))
         if device == 'cuda':
@@ -182,13 +242,14 @@ def main():
                                            f"{global_step}; cannot build M_k.")
                 e = ckpt_steps[global_step]
                 fname = f"checkpoint_{e:03d}.pth"
-                torch.save({'model': {k: v.detach().cpu().clone()
-                                      for k, v in snapshot.items()},
-                            'exp_avg_sq': exp_avg_sq,
-                            'step': global_step, 'epoch': e, 'lr': float(epoch_lr),
-                            'optimizer': args.optimizer,
-                            'betas': (args.beta1, args.beta2), 'eps': args.adam_eps},
-                           os.path.join(args.save_dir, fname))
+                common.atomic_torch_save(
+                    {'model': {k: v.detach().cpu().clone()
+                               for k, v in snapshot.items()},
+                     'exp_avg_sq': exp_avg_sq,
+                     'step': global_step, 'epoch': e, 'lr': float(epoch_lr),
+                     'optimizer': args.optimizer,
+                     'betas': (args.beta1, args.beta2), 'eps': args.adam_eps},
+                    os.path.join(args.save_dir, fname))
                 records.append({'file': fname, 'step': global_step, 'epoch': e,
                                 'lr': float(epoch_lr)})
                 logger.info(f"--> checkpoint epoch {e} (step {global_step}, "
@@ -200,22 +261,44 @@ def main():
         epoch_seconds.append(time.perf_counter() - t0)
 
         manifest = {
+            'schema_version': 2, 'run_id': run_id,
             'optimizer': args.optimizer, 'lr': lr, 'weight_decay': args.weight_decay,
             'betas': [args.beta1, args.beta2], 'eps': args.adam_eps,
-            'dataset': args.dataset, 'seed': args.seed,
+            'dataset': args.dataset, 'architecture': cfg['architecture'], 'seed': args.seed,
             'num_epochs': num_epochs, 'batch_size': args.batch_size,
             'n_train': n_train, 'steps_per_epoch': spe,
+            'pool_indices_sha256': pool_indices_sha256,
             'total_steps': num_epochs * spe,
-            'epochs_completed': epoch,
+            'epochs_completed': epoch, 'immutable_config': immutable_config,
+            'initial_state_sha256': initial_state_sha256,
             'epoch_lrs': epoch_lrs, 'checkpoints': records,
         }
-        with open(os.path.join(args.save_dir, ref.MANIFEST_NAME), 'w') as fh:
-            json.dump(manifest, fh, indent=4)
-        with open(os.path.join(args.save_dir, 'train_time.json'), 'w') as fh:
-            json.dump({'epoch_seconds': epoch_seconds,
-                       'total_seconds': sum(epoch_seconds),
-                       'device': torch.cuda.get_device_name() if device == 'cuda' else 'cpu'},
-                      fh, indent=4)
+        common.atomic_json_dump(manifest, os.path.join(args.save_dir, ref.MANIFEST_NAME))
+        common.atomic_json_dump(
+            {'epoch_seconds': epoch_seconds,
+             'total_seconds': sum(epoch_seconds),
+             'device': torch.cuda.get_device_name() if device == 'cuda' else 'cpu',
+             'run_id': run_id},
+            os.path.join(args.save_dir, 'train_time.json'))
+
+        training_state = {
+            'run_id': run_id,
+            'initial_state_sha256': initial_state_sha256,
+            'epoch': epoch,
+            'global_step': global_step,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'epoch_lrs': epoch_lrs,
+            'epoch_seconds': epoch_seconds,
+            'checkpoints': records,
+            'pool_indices_sha256': pool_indices_sha256,
+            'torch_rng_state': torch.get_rng_state(),
+            'cuda_rng_state_all': torch.cuda.get_rng_state_all() if device == 'cuda' else None,
+        }
+        state_tmp = f"{state_path}.tmp.{os.getpid()}"
+        torch.save(training_state, state_tmp)
+        os.replace(state_tmp, state_path)
 
         if epoch % 10 == 0 or epoch <= 10:
             logger.info(f"Epoch {epoch:03d}/{num_epochs} | lr {epoch_lr:.6f} | "

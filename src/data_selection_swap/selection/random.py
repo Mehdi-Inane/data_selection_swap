@@ -14,7 +14,8 @@ def main():
     common.set_seed(args.seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                    architecture=args.architecture)
     trainset, _, _, n_train = common.make_loaders(
         cfg, args.seed, args.batch_size, args.num_workers, args.scoring_transform)
     budget = int(args.fraction * n_train)

@@ -84,7 +84,12 @@ import re
 
 import numpy as np
 
-N_TRAIN = {'cifar100': 45000, 'imagenet': 1281167 - int(0.1 * 1281167)}
+N_TRAIN = {
+    'cifar10': 45000,
+    'cifar100': 45000,
+    'mnist': 54000,
+    'imagenet': 1281167 - int(0.1 * 1281167),
+}
 
 
 def load_json(path):
@@ -104,7 +109,8 @@ def run_dir(scratch, method, dataset, budget, seed):
 def discover_methods(scratch, dataset):
     kl_root = os.path.join(scratch, 'gradmatch_swap', dataset)
     kl_pattern = re.compile(
-        r'^(kl_faithful(?:_[a-zA-Z0-9]+)*)_\d+_K\d+_metrics\.json$')
+        r'^(kl_faithful(?:_[a-zA-Z0-9]+)*)_\d+_K\d+'
+        r'(?:_cfg[0-9a-f]+)?_metrics\.json$')
     kl_methods = set()
     if os.path.isdir(kl_root):
         for _, _, files in os.walk(kl_root):
@@ -124,7 +130,30 @@ def discover_methods(scratch, dataset):
 
 def _metrics_pattern(method, budget):
     """Match one method's metrics, with an optional checkpoint-count tag."""
-    return re.compile(rf'^{re.escape(method)}_{budget}(?:_K(\d+))?_metrics\.json$')
+    return re.compile(
+        rf'^{re.escape(method)}_{budget}(?:_K(?P<k>\d+))?'
+        rf'(?:_cfg(?P<run_id>[0-9a-f]+))?_metrics\.json$')
+
+
+def _run_description(metrics_path, filename_run_id):
+    """Human-readable identity for a discovered selector artifact."""
+    prefix = metrics_path[:-len('_metrics.json')]
+    manifest_path = f'{prefix}_run.json'
+    manifest = load_json(manifest_path)
+    manifest_run_id = manifest.get('run_id') if isinstance(manifest, dict) else None
+    run_id = manifest_run_id or filename_run_id or 'legacy/no-run-id'
+    selector = None
+    if isinstance(manifest, dict):
+        config = manifest.get('config')
+        if isinstance(config, dict):
+            selector = config.get('selector')
+    fields = [f"run_id={run_id!r}", f"metrics={metrics_path!r}"]
+    if selector is not None:
+        fields.append(f"selector={selector!r}")
+    fields.append(
+        f"manifest={manifest_path!r}" if os.path.exists(manifest_path)
+        else "manifest=<missing>")
+    return "{" + ", ".join(fields) + "}"
 
 
 def discover_runs(d, method, budget):
@@ -137,22 +166,51 @@ def discover_runs(d, method, budget):
 
     Signature intentionally unchanged (still a 3-tuple) so existing callers
     (e.g. plot_checkpoint_ablation.py) keep working unmodified. Use
-    indices_path_for(metrics_path) to get the matching indices file.
+    indices_path_for(metrics_path) to get the matching indices file. If two
+    config fingerprints occupy the same K cell in this seed directory, fail
+    explicitly instead of counting a configuration rerun as another seed.
     """
     if not os.path.isdir(d):
         return []
     pattern = _metrics_pattern(method, budget)
-    runs = []
+    candidates = []
     for fname in sorted(os.listdir(d)):
         m = pattern.match(fname)
         if not m:
             continue
-        k = int(m.group(1)) if m.group(1) is not None else None
+        k = int(m.group('k')) if m.group('k') is not None else None
         prefix = fname[:-len('_metrics.json')]
         timing_path = os.path.join(d, f'{prefix}_timing.json')
-        runs.append((k, os.path.join(d, fname),
-                     timing_path if os.path.exists(timing_path) else None))
-    return runs
+        candidates.append({
+            'k': k,
+            'run_id': m.group('run_id'),
+            'metrics': os.path.join(d, fname),
+            'timing': timing_path if os.path.exists(timing_path) else None,
+        })
+
+    # A directory is one seed. More than one configuration in the same
+    # (method, budget, K, seed-directory) cell is not another independent
+    # seed; averaging both would silently pseudo-replicate that seed.
+    by_k = {}
+    for candidate in candidates:
+        by_k.setdefault(candidate['k'], []).append(candidate)
+    conflicts = {k: values for k, values in by_k.items() if len(values) > 1}
+    if conflicts:
+        details = []
+        for k, values in sorted(conflicts.items(), key=lambda item: str(item[0])):
+            runs = "; ".join(
+                _run_description(value['metrics'], value['run_id'])
+                for value in values)
+            details.append(f"K={k!r}: {runs}")
+        raise RuntimeError(
+            "Multiple selector configurations occupy the same aggregation cell "
+            f"(directory={d!r}, method={method!r}, budget={budget}). Refusing to "
+            "treat configuration reruns as replicate seeds. Keep exactly one run per "
+            "K or aggregate explicit run_id groups separately. Conflicts: "
+            + " | ".join(details))
+
+    return [(candidate['k'], candidate['metrics'], candidate['timing'])
+            for candidate in candidates]
 
 
 def indices_path_for(metrics_path):
@@ -165,7 +223,10 @@ def indices_path_for(metrics_path):
 
 
 def mean_std(values):
-    return (float(np.mean(values)), float(np.std(values))) if values else (float('nan'),) * 2
+    if not values:
+        return (float('nan'),) * 2
+    ddof = 1 if len(values) > 1 else 0
+    return float(np.mean(values)), float(np.std(values, ddof=ddof))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,9 +262,10 @@ class ObjectiveScorer:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.proj_dim = proj_dim
+        self.dataset = dataset
+        self.checkpoint_dir = checkpoint_dir
 
         self.cfg = self._load_dataset_config(sc, dataset, data_dir, download)
-        self.ckpt_paths_all = sc.list_checkpoints(checkpoint_dir)
 
         self._pool_cache   = {}   # seed -> (X, Y, n_train)
         self._traj_cache   = {}   # (seed, K) -> (trajectory, c_sum, n_train)
@@ -238,11 +300,12 @@ class ObjectiveScorer:
     def _pool(self, seed):
         if seed not in self._pool_cache:
             self.sc.set_seed(seed)
-            _, eval_loader, _, n_train = self.sc.make_loaders(
+            trainset, eval_loader, _, n_train = self.sc.make_loaders(
                 self.cfg, seed, self.batch_size, self.num_workers)
             X, Y = self.objective.materialise(
                 eval_loader.dataset, self.device, self.batch_size, self.num_workers)
-            self._pool_cache[seed] = (X, Y, n_train)
+            pool_hash = self.sc.ordered_indices_fingerprint(trainset.indices)
+            self._pool_cache[seed] = (X, Y, n_train, pool_hash)
         return self._pool_cache[seed]
 
     def trajectory(self, seed, k):
@@ -251,23 +314,31 @@ class ObjectiveScorer:
         if key in self._traj_cache:
             return self._traj_cache[key]
 
-        X, Y, n_train = self._pool(seed)
-        ckpt_paths = self.ckpt_paths_all[:k] if k and k > 0 else self.ckpt_paths_all
+        X, Y, n_train, pool_hash = self._pool(seed)
+        checkpoints, _, _ = self.ref.resolve(
+            self.checkpoint_dir, optimizer='uniform',
+            num_checkpoints=k or 0, selection='spread', n_train=n_train,
+            batch_size=self.batch_size, num_epochs=self.cfg['num_epochs'],
+            expected_dataset=self.dataset, expected_seed=seed,
+            expected_architecture=self.cfg.get('architecture'),
+            expected_pool_indices_sha256=pool_hash)
 
         R_L = R_Phi = None
         if self.proj_dim > 0:
             R_L   = self.kl.build_sparse_jl(self.cfg['num_classes'], self.proj_dim,
                                             seed=seed).to(self.device)
-            R_Phi = self.kl.build_sparse_jl(self.sc.FEAT_DIM, self.proj_dim,
+            model = self._model_with(checkpoints[0].path)
+            R_Phi = self.kl.build_sparse_jl(self.sc.feature_dim(model), self.proj_dim,
                                             seed=seed + 1).to(self.device)
 
         trajectory = []
-        for ckpt in ckpt_paths:
-            model = self._model_with(ckpt)
+        for checkpoint in checkpoints:
+            model = self._model_with(checkpoint.path)
             L, Phi = self.kl.extract_factored_features(
                 model, X, Y, self.batch_size, R_L=R_L, R_Phi=R_Phi,
-                include_bias=False)
-            trajectory.append((L.to(self.device), Phi.to(self.device), None, 1.0))
+                include_bias=True)
+            trajectory.append((L.to(self.device), Phi.to(self.device), None,
+                               checkpoint.weight))
 
         c_sum = self.kl.weighted_kernel_mv(
             trajectory, self.torch.ones(n_train, device=self.device))
@@ -400,13 +471,14 @@ def main():
                 if not bucket['acc'] and not bucket['sel']:
                     continue
                 rows.append(dict(fraction=fraction, method=method, k=k,
-                                 n_seeds=len(bucket['acc']), acc=mean_std(bucket['acc']),
+                                 n_acc=len(bucket['acc']), n_time=len(bucket['sel']),
+                                 n_obj=len(bucket['obj']), acc=mean_std(bucket['acc']),
                                  selection_s=mean_std(bucket['sel']),
                                  reference_s=mean_std(bucket['refc']),
                                  total_s=mean_std(bucket['tot']),
                                  obj=mean_std(bucket['obj'])))
 
-    header = (f"{'frac':<6}{'method':<34}{'K':<6}{'seeds':<7}{'test acc %':<16}"
+    header = (f"{'frac':<6}{'method':<34}{'K':<6}{'n(a/t/d)':<11}{'test acc %':<16}"
               f"{'D_alpha':<20}{'selection (s)':<20}{'reference (s)':<16}{'total (s)':<16}")
     print("\n" + header + "\n" + "-" * len(header))
     last = None
@@ -417,7 +489,8 @@ def main():
         k_disp = str(r['k']) if r['k'] is not None else '–'
         obj_m, obj_s = r['obj']
         obj_disp = f"{obj_m:8.4g} ± {obj_s:<8.4g}" if not np.isnan(obj_m) else f"{'–':<19}"
-        print(f"{r['fraction']:<6}{r['method']:<34}{k_disp:<6}{r['n_seeds']:<7}"
+        counts = f"{r['n_acc']}/{r['n_time']}/{r['n_obj']}"
+        print(f"{r['fraction']:<6}{r['method']:<34}{k_disp:<6}{counts:<11}"
               f"{r['acc'][0]:6.2f} ± {r['acc'][1]:<6.2f}"
               f"{obj_disp:<20}"
               f"{r['selection_s'][0]:9.1f} ± {r['selection_s'][1]:<8.1f}"
@@ -428,13 +501,16 @@ def main():
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     with open(out_csv, 'w', newline='') as fh:
         w = csv.writer(fh)
-        w.writerow(['fraction', 'method', 'num_checkpoints', 'n_seeds', 'acc_mean', 'acc_std',
+        w.writerow(['fraction', 'method', 'num_checkpoints', 'n_accuracy', 'n_timing',
+                    'n_objective', 'acc_mean', 'acc_std',
                     'D_alpha_mean', 'D_alpha_std',
-                    'selection_s_mean', 'selection_s_std', 'reference_s', 'total_s_mean'])
+                    'selection_s_mean', 'selection_s_std',
+                    'reference_s_mean', 'reference_s_std',
+                    'total_s_mean', 'total_s_std'])
         for r in rows:
             w.writerow([r['fraction'], r['method'], r['k'] if r['k'] is not None else '',
-                        r['n_seeds'], *r['acc'], *r['obj'],
-                        *r['selection_s'], r['reference_s'][0], r['total_s'][0]])
+                        r['n_acc'], r['n_time'], r['n_obj'], *r['acc'], *r['obj'],
+                        *r['selection_s'], *r['reference_s'], *r['total_s']])
     print(f"\nSaved → {out_csv}")
 
 

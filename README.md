@@ -5,12 +5,21 @@ This repository implements the trajectory-based data-selection framework in
 training subset whose gradients reproduce the full-data gradients along a saved
 training trajectory, then evaluates the subset by retraining a fresh model.
 
-The maintained code supports CIFAR-100 and ImageNet, a factored last-layer method,
-a matrix-free full-network method, and Random, Herding, Moderate Coreset, EL2N,
-MoSo, GraphCut, Facility Location, and GradMatch baselines. All maintained methods
-share the same split, model construction, retraining loop, timing convention, and
-artifact layout described in
+The maintained code supports CIFAR-10, CIFAR-100, MNIST, and ImageNet with
+ResNet-18, ResNet-34, LeNet, and ConvNet architectures. It includes a factored
+last-layer method, a matrix-free full-network method, and Random, Herding,
+Moderate Coreset, EL2N, MoSo, GraphCut, Facility Location, and GradMatch
+baselines. Controlled experiment drivers use seed-matched trajectories, clean
+scoring views, frozen subset indices, shared retraining initializations, and
+immutable configuration-hashed artifacts. The common protocol is described in
 [the experimental protocol](docs/experimental_protocol.md).
+
+The selector is an empirical gradient-discrepancy method for ordinary
+SGD/Adam trajectories. It is not the manuscript's full-batch Langevin process,
+so its reported certificate applies to the implemented quadratic objective,
+not automatically to the manuscript's end-to-end KL theorem. ResNet/ConvNet
+scores use frozen BatchNorm statistics and are explicitly labeled as a
+surrogate; the BN-free LeNet cells are the primary exact per-example controls.
 
 ## Optimizer-aware scoring: SGD and Adam
 
@@ -100,21 +109,51 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-The code imports the CORDS `ResNet18` and GradMatch implementation. Use the same
-CORDS installation as the experiment environment (the cluster launchers activate
-the `gradmatch` Conda environment). The editable install is important: it makes
+The code imports CORDS 0.0.4 for `ResNet18` and GradMatch. The editable install
+is important: it makes
 every script import the package from `src/data_selection_swap` consistently.
 
 Dataset roots should have these layouts:
 
 ```text
+/path/to/cifar10/                 torchvision CIFAR-10 root
 /path/to/cifar100/                torchvision CIFAR-100 root
+/path/to/mnist/                   torchvision MNIST root
 /path/to/imagenet/train/<class>/  ImageNet training images
 /path/to/imagenet/val/<class>/    ImageNet validation images
 ```
 
-Pass `--download` for CIFAR-100 if it is not already present. ImageNet must be
-staged manually or through `scripts/slurm/stage_dataset.sh`.
+Pass `--download` for CIFAR-10, CIFAR-100, or MNIST if it is not already
+present. ImageNet must be staged manually or through
+`scripts/slurm/stage_dataset.sh`.
+
+## Controlled experiment suites
+
+The requested experiments have dedicated drivers and example configurations:
+
+- SGD versus Adam, reference/retraining learning-rate grids, and uniform versus
+  learning-rate-aware scoring: `scripts/experiments/optimizer_lr.py` with
+  `optimizer_lr.example.json`.
+- Manuscript Algorithm 2 versus Algorithm 3 with the same trajectory, initial
+  subset, and retraining initialization: `compare_swap_rules.py` with
+  `swap_rules.example.json`. The validator requires `max_pairs=0`, so the
+  Algorithm 2 pair search cannot silently become a truncated approximation.
+- Correlation between all-parameter `D(alpha)` and final test accuracy on
+  CIFAR-10/CIFAR-100/MNIST and multiple networks:
+  `run_d_accuracy_correlation.py`, followed by
+  `scripts/analyze/analyze_d_correlation.py`.
+
+See [the optimizer/swap experiment guide](scripts/experiments/README.md) and
+[the D(alpha) correlation guide](scripts/experiments/README_D_CORRELATION.md)
+for local inspection, Slurm submission, output schemas, and statistical
+analysis. Start by validating the supplied plans:
+
+```bash
+python scripts/experiments/optimizer_lr.py validate \
+  --config scripts/experiments/optimizer_lr.example.json
+python scripts/experiments/compare_swap_rules.py validate \
+  --config scripts/experiments/swap_rules.example.json
+```
 
 ## Run an SGD experiment
 
@@ -305,6 +344,11 @@ sbatch scripts/slurm/run_kl_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
 sbatch scripts/slurm/run_gradmatch_selection.sh
+
+# Controlled multi-stage suites (submitters add strict afterok dependencies)
+scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json
+scripts/slurm/submit_swap_rules.sh scripts/experiments/swap_rules.example.json
+STAGE=reference sbatch scripts/slurm/run_d_accuracy_correlation.sh
 ```
 
 Environment variables such as `DATASET_OVERRIDE`, `CHECKPOINT_DIR`,
@@ -327,6 +371,8 @@ CHECKPOINT_DIR=/path/to/adam_checkpoints OPTIMIZER=adam METRIC=adam \
 ## Reproducibility notes
 
 - Use the same `--seed` for the 90/10 split, selection, and retraining.
+- New trajectory manifests store and consumers verify a hash of the ordered
+  pool indices; a seed label alone is not accepted as proof of split identity.
 - Use the same `--scoring_transform` for every method. `test` gives a stable,
   unaugmented scoring view; `train` reproduces the earlier runs.
 - Prefer `--checkpoint_selection spread`; `prefix` intentionally reproduces the
@@ -336,3 +382,7 @@ CHECKPOINT_DIR=/path/to/adam_checkpoints OPTIMIZER=adam METRIC=adam \
   optimizer steps.
 - The files in `scripts/legacy/` are retained for provenance and are not part of
   the maintained workflow.
+- Exact Algorithm 2 has quadratic worst-case pair count per iteration and can
+  be substantially slower than Algorithm 3. Use a small smoke configuration
+  before allocating the full grid; any positive `max_pairs` is reported as a
+  truncated, non-certifying search.

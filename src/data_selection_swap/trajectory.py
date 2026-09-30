@@ -234,6 +234,14 @@ def _available(checkpoint_dir, manifest):
     if manifest is not None:
         out = [(os.path.join(checkpoint_dir, c['file']), int(c['step']),
                 int(c['epoch']), float(c['lr'])) for c in manifest['checkpoints']]
+        missing = [path for path, *_ in out if not os.path.isfile(path)]
+        if missing:
+            raise FileNotFoundError(
+                f"trajectory.json references missing checkpoint(s): {missing[:3]}"
+            )
+        steps = [row[1] for row in out]
+        if len(steps) != len(set(steps)) or any(b <= a for a, b in zip(steps, steps[1:])):
+            raise ValueError("trajectory checkpoint steps must be unique and increasing")
         return sorted(out, key=lambda r: r[1])
 
     paths = sorted(glob.glob(os.path.join(checkpoint_dir, 'checkpoint_*.pth')))
@@ -267,10 +275,25 @@ def _pick(available, num_checkpoints, selection, epochs, steps):
     if selection != 'spread':
         raise ValueError(f"Unknown selection: {selection!r}")
 
-    # Evenly spaced by position, endpoints included, so the resolved set
-    # actually spans the run instead of clustering at its start.
-    pos = np.unique(np.linspace(0, len(available) - 1, num_checkpoints).round().astype(int))
-    return [available[i] for i in pos]
+    # Space in training time (optimizer step), not in checkpoint-list
+    # position.  The historical cadence saves epochs 1..10 densely and then
+    # every 10 epochs; list-position quantiles therefore overrepresented the
+    # first few epochs even though the option was called ``spread``.
+    coordinate = np.asarray(
+        [row[1] if row[1] > 0 else row[2] for row in available],
+        dtype=np.float64)
+    targets = np.linspace(coordinate[0], coordinate[-1], num_checkpoints)
+    positions = []
+    previous = -1
+    for t, target in enumerate(targets):
+        # Keep enough entries available for all later targets.
+        lo = previous + 1
+        hi = len(available) - (num_checkpoints - t) + 1
+        candidates = np.arange(lo, hi)
+        best = int(candidates[np.argmin(np.abs(coordinate[candidates] - target))])
+        positions.append(best)
+        previous = best
+    return [available[i] for i in positions]
 
 
 def _windows(steps, total_steps):
@@ -338,7 +361,10 @@ def resolve(checkpoint_dir, *, optimizer='uniform', num_checkpoints=10,
             selection='spread', epochs=None, steps=None,
             n_train=None, batch_size=128, base_lr=0.01, num_epochs=None,
             beta1=0.9, momentum='persistent', metric='auto',
-            checkpoint_weighting='point'):
+            checkpoint_weighting='point', expected_dataset=None,
+            expected_seed=None, expected_architecture=None,
+            expected_pool_indices_sha256=None,
+            allow_manifest_mismatch=False):
     """
     -> (checkpoints, manifest, description).
 
@@ -354,6 +380,30 @@ def resolve(checkpoint_dir, *, optimizer='uniform', num_checkpoints=10,
 
     manifest = load_manifest(checkpoint_dir)
     if manifest is not None:
+        expected = {
+            'dataset': expected_dataset,
+            'seed': expected_seed,
+            'architecture': expected_architecture,
+            'pool_indices_sha256': expected_pool_indices_sha256,
+            'n_train': n_train,
+            'batch_size': batch_size,
+        }
+        mismatches = []
+        for key, wanted in expected.items():
+            if wanted is None:
+                continue
+            actual = manifest.get(key)
+            # Old manifests did not record architecture.  Missing metadata is
+            # unsafe for a controlled comparison, just like a wrong value.
+            if actual is None or str(actual) != str(wanted):
+                mismatches.append(f"{key}: trajectory={actual!r}, requested={wanted!r}")
+        if mismatches and not allow_manifest_mismatch:
+            raise ValueError(
+                "Reference trajectory is incompatible with this run: "
+                + "; ".join(mismatches)
+                + ". Use the matching trajectory, or explicitly pass the caller's "
+                  "unsafe legacy override."
+            )
         spe, epoch_lrs = _schedule_from_manifest(manifest)
         ref_optimizer = manifest.get('optimizer', 'sgd')
         num_epochs = int(manifest['num_epochs'])

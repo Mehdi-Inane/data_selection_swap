@@ -16,7 +16,9 @@ embedding).
 """
 
 import copy
+import fcntl
 import glob
+import hashlib
 import heapq
 import json
 import logging
@@ -32,12 +34,157 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.datasets as datasets
+import torchvision.models as tv_models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset, random_split
 
 from cords.utils.models import ResNet18
 
-FEAT_DIM = 512  # ResNet18 penultimate layer width, all datasets below
+DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet')
+ARCHITECTURES = ('resnet18', 'resnet34', 'lenet', 'convnet')
+# Backward-compatible default. New code should call ``feature_dim(model)``.
+FEAT_DIM = 512
+
+
+def config_fingerprint(config: dict, length: int = 12) -> str:
+    """Stable identifier for an experiment's immutable configuration."""
+    payload = json.dumps(config, sort_keys=True, separators=(',', ':'),
+                         default=str).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()[:length]
+
+
+def state_dict_fingerprint(state_dict) -> str:
+    """Content hash of model tensors, independent of ``torch.save`` metadata."""
+    digest = hashlib.sha256()
+    for name in sorted(state_dict):
+        tensor = state_dict[name].detach().cpu().contiguous()
+        digest.update(name.encode('utf-8'))
+        digest.update(b'\0')
+        digest.update(str(tensor.dtype).encode('ascii'))
+        digest.update(b'\0')
+        digest.update(json.dumps(list(tensor.shape)).encode('ascii'))
+        digest.update(b'\0')
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def ordered_indices_fingerprint(indices) -> str:
+    """Hash an ordered split mapping in a platform-independent representation.
+
+    Pool-relative selector indices only have meaning together with this order.
+    Sorting before hashing would therefore hide exactly the split-order mismatch
+    that trajectory consumers need to reject.
+    """
+    values = np.asarray([int(value) for value in indices], dtype='<i8')
+    digest = hashlib.sha256()
+    digest.update(str(values.size).encode('ascii'))
+    digest.update(b'\0')
+    digest.update(values.tobytes(order='C'))
+    return digest.hexdigest()
+
+
+def atomic_json_dump(record: dict, path: str) -> None:
+    """Write JSON atomically so interrupted jobs do not leave partial files."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, 'w') as fh:
+        json.dump(record, fh, indent=2, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def atomic_torch_save(record, path: str) -> None:
+    """Atomically publish a torch artifact after the full payload is durable."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        torch.save(record, tmp)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+class LeNet(nn.Module):
+    """LeNet-style classifier with a named ``linear`` last layer.
+
+    Adaptive pooling makes the same implementation valid for MNIST's 28x28
+    inputs and CIFAR's 32x32 inputs.  Exposing the final layer as ``linear``
+    keeps the factored last-layer selector architecture independent.
+    """
+
+    def __init__(self, in_channels: int, num_classes: int):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 6, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(2),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(2),
+            nn.AdaptiveAvgPool2d((5, 5)),
+        )
+        self.project = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(16 * 5 * 5, 120),
+            nn.ReLU(inplace=True),
+            nn.Linear(120, 84),
+            nn.ReLU(inplace=True),
+        )
+        self.linear = nn.Linear(84, num_classes)
+
+    def forward(self, x):
+        return self.linear(self.project(self.features(x)))
+
+
+class ConvNet(nn.Module):
+    """Small conventional CNN used as a second non-ResNet architecture."""
+
+    def __init__(self, in_channels: int, num_classes: int, width: int = 64):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, width, 3, padding=1, bias=False),
+            nn.BatchNorm2d(width),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(width, 2 * width, 3, padding=1, bias=False),
+            nn.BatchNorm2d(2 * width),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(2 * width, 2 * width, 3, padding=1, bias=False),
+            nn.BatchNorm2d(2 * width),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        self.linear = nn.Linear(2 * width, num_classes)
+
+    def forward(self, x):
+        return self.linear(self.features(x))
+
+
+class TorchvisionResNet(nn.Module):
+    """torchvision ResNet wrapper exposing its classifier as ``linear``."""
+
+    def __init__(self, depth: int, in_channels: int, num_classes: int,
+                 small_images: bool):
+        super().__init__()
+        constructor = {18: tv_models.resnet18, 34: tv_models.resnet34}[depth]
+        self.backbone = constructor(weights=None)
+        if small_images:
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            self.backbone.maxpool = nn.Identity()
+        elif in_channels != 3:
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        feature_dim = self.backbone.fc.in_features
+        self.backbone.fc = nn.Identity()
+        self.linear = nn.Linear(feature_dim, num_classes)
+
+    def forward(self, x):
+        return self.linear(self.backbone(x))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,8 +202,22 @@ def set_seed(seed=42):
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset configuration shared by every maintained workflow
 # ─────────────────────────────────────────────────────────────────────────────
-def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> dict:
-    """Return per-dataset hyper-params, transforms, and dataset objects."""
+def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
+                       architecture: str = None) -> dict:
+    """Return transforms, datasets, and model metadata for ``dataset``.
+
+    ``architecture`` is stored in the returned configuration so every stage
+    (trajectory training, selection, and subset retraining) builds the same
+    network.  Leaving it unset preserves the historical ResNet-18 default for
+    colour datasets and uses LeNet for MNIST.
+    """
+    dataset = dataset.lower()
+    default_architecture = 'lenet' if dataset == 'mnist' else 'resnet18'
+    architecture = architecture or default_architecture
+    if architecture not in ARCHITECTURES:
+        raise ValueError(
+            f"Unknown architecture: {architecture!r}. Choose one of {ARCHITECTURES}."
+        )
     if dataset == 'cifar10':
         mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
         tf_tr = transforms.Compose([
@@ -66,7 +227,9 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
         ])
         tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
         return dict(
-            num_classes=10, num_epochs=300, cifar_style=True,
+            dataset='cifar10', num_classes=10, num_epochs=300,
+            small_images=True, cifar_style=True, input_channels=3,
+            architecture=architecture,
             full_train=datasets.CIFAR10(root=data_dir, train=True, download=download, transform=tf_tr),
             testset=datasets.CIFAR10(root=data_dir, train=False, download=download, transform=tf_te),
         )
@@ -80,9 +243,30 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
         ])
         tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
         return dict(
-            num_classes=100, num_epochs=300, cifar_style=True,
+            dataset='cifar100', num_classes=100, num_epochs=300,
+            small_images=True, cifar_style=True, input_channels=3,
+            architecture=architecture,
             full_train=datasets.CIFAR100(root=data_dir, train=True,  download=download, transform=tf_tr),
             testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
+        )
+
+    if dataset == 'mnist':
+        mean, std = (0.1307,), (0.3081,)
+        tf_tr = transforms.Compose([
+            transforms.RandomCrop(28, padding=2),
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        tf_te = transforms.Compose([
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        return dict(
+            dataset='mnist', num_classes=10, num_epochs=100,
+            small_images=True, cifar_style=True, input_channels=1,
+            architecture=architecture,
+            full_train=datasets.MNIST(root=data_dir, train=True, download=download,
+                                      transform=tf_tr),
+            testset=datasets.MNIST(root=data_dir, train=False, download=download,
+                                   transform=tf_te),
         )
 
     if dataset == 'imagenet':
@@ -97,31 +281,67 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False) -> d
             transforms.ToTensor(), transforms.Normalize(mean, std),
         ])
         return dict(
-            num_classes=1000, num_epochs=350, cifar_style=False,
+            dataset='imagenet', num_classes=1000, num_epochs=350,
+            small_images=False, cifar_style=False, input_channels=3,
+            architecture=architecture,
             full_train=datasets.ImageFolder(os.path.join(data_dir, 'train'), transform=tf_tr),
             testset   =datasets.ImageFolder(os.path.join(data_dir, 'val'),   transform=tf_te),
         )
 
     raise ValueError(
-        f"Unknown dataset: {dataset!r}. Choose 'cifar10', 'cifar100', or 'imagenet'."
+        f"Unknown dataset: {dataset!r}. Choose one of {DATASETS}."
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model construction, including the shared CIFAR stem
 # ─────────────────────────────────────────────────────────────────────────────
-def build_model(cfg: dict, num_classes: int, device: str) -> nn.Module:
-    model = ResNet18(num_classes=num_classes)
-    if cfg['cifar_style']:
-        model.conv1   = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        model.maxpool = nn.Identity()
+def build_model(cfg: dict, num_classes: int, device: str,
+                architecture: str = None) -> nn.Module:
+    """Build a supported network with a common ``linear`` classifier API."""
+    architecture = architecture or cfg.get('architecture', 'resnet18')
+    in_channels = int(cfg.get('input_channels', 3))
+    small_images = bool(cfg.get('small_images', cfg.get('cifar_style', False)))
+
+    if architecture == 'resnet18':
+        # Preserve checkpoint compatibility with the original experiments.
+        model = ResNet18(num_classes=num_classes)
+        if small_images or in_channels != 3:
+            model.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            model.maxpool = nn.Identity()
+    elif architecture == 'resnet34':
+        model = TorchvisionResNet(34, in_channels, num_classes, small_images)
+    elif architecture == 'lenet':
+        model = LeNet(in_channels, num_classes)
+    elif architecture == 'convnet':
+        model = ConvNet(in_channels, num_classes)
+    else:
+        raise ValueError(
+            f"Unknown architecture: {architecture!r}. Choose one of {ARCHITECTURES}."
+        )
     return model.to(device)
+
+
+def classifier_layer(model: nn.Module) -> nn.Linear:
+    """Return the final linear classifier used by factored-gradient code."""
+    layer = getattr(model, 'linear', None)
+    if not isinstance(layer, nn.Linear):
+        raise TypeError(
+            f"{type(model).__name__} does not expose an nn.Linear 'linear' classifier."
+        )
+    return layer
+
+
+def feature_dim(model: nn.Module) -> int:
+    """Width of the penultimate representation feeding the classifier."""
+    return int(classifier_layer(model).in_features)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data loaders — identical split logic/seed across every method
 # ─────────────────────────────────────────────────────────────────────────────
-def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'train') -> Subset:
+def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'test') -> Subset:
     """
     The dataset view that selection methods *score* (not train on).
     'train' reproduces the original KL runs (augmented views);
@@ -136,7 +356,7 @@ def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'train'
 
 
 def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int,
-                 scoring_transform: str = 'train'):
+                 scoring_transform: str = 'test'):
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     trainset, _ = random_split(
@@ -261,14 +481,25 @@ def load_or_create_init(model: nn.Module, path, logger=None) -> str:
     """
     if not path:
         return "fresh initialisation (pass --init_ckpt to share one)"
-    if os.path.exists(path):
-        model.load_state_dict(torch.load(path, map_location=next(model.parameters()).device))
-        return f"initialisation loaded from {path}"
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    torch.save({k: v.detach().cpu().clone() for k, v in model.state_dict().items()}, path)
-    if logger:
-        logger.info(f"Wrote a shared retraining initialisation to {path}")
-    return f"initialisation saved to {path}"
+    device = next(model.parameters()).device
+    lock_path = f"{path}.lock"
+    with open(lock_path, 'a+b') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if os.path.exists(path):
+            model.load_state_dict(torch.load(path, map_location=device))
+            note = f"initialisation loaded from {path}"
+        else:
+            tmp = f"{path}.tmp.{os.getpid()}"
+            torch.save(
+                {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                tmp)
+            os.replace(tmp, path)
+            note = f"initialisation saved to {path}"
+            if logger:
+                logger.info(f"Wrote a shared retraining initialisation to {path}")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return note
 
 
 def build_optimizer(params, kind: str, lr: float, weight_decay: float = 5e-4,
@@ -298,7 +529,7 @@ def extract_probs_features_targets(model: nn.Module, dataloader, device: str):
     def _hook(_, inp, __):
         feats['phi'] = inp[0]
 
-    handle = model.linear.register_forward_hook(_hook)
+    handle = classifier_layer(model).register_forward_hook(_hook)
 
     probs_buf, phi_buf, targets_buf = [], [], []
     for inputs, targets in dataloader:
@@ -452,8 +683,7 @@ def save_timing(path: str, timer: SelectionTimer, logger, **extra):
         device=torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu',
         **extra,
     )
-    with open(path, 'w') as fh:
-        json.dump(record, fh, indent=4)
+    atomic_json_dump(record, path)
     logger.info(f"Selection time: {timer.total():.1f}s  phases="
                 + ", ".join(f"{k}={v:.1f}s" for k, v in timer.phases.items()))
 
@@ -491,20 +721,37 @@ def get_logger(name: str, log_path: str) -> logging.Logger:
 # ─────────────────────────────────────────────────────────────────────────────
 def base_argparser(description: str):
     import argparse
+
+    def open_unit_interval(value):
+        parsed = float(value)
+        if not math.isfinite(parsed) or not 0.0 < parsed < 1.0:
+            raise argparse.ArgumentTypeError('fraction must be finite and strictly between 0 and 1')
+        return parsed
+
     p = argparse.ArgumentParser(description=description,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--fraction',       default=0.3,         type=float)
+    p.add_argument('--fraction',       default=0.3,         type=open_unit_interval)
     p.add_argument('--seed', '-seed',  default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str,
                    help='Shared reference-trajectory directory')
-    p.add_argument('--dataset',        default='cifar100',  choices=['cifar100', 'imagenet'])
+    p.add_argument('--dataset',        default='cifar100',  choices=list(DATASETS))
+    p.add_argument('--architecture',   default=None, choices=list(ARCHITECTURES),
+                   help='Network architecture. Defaults to resnet18, or lenet for MNIST.')
     p.add_argument('--data_dir',       required=True,       type=str)
     p.add_argument('--batch_size',     default=128,         type=int)
     p.add_argument('--lr',             default=0.01,        type=float,
                    help='Learning rate for the final retrain-on-subset stage')
+    p.add_argument('--retrain_optimizer', default='sgd', choices=['sgd', 'adam', 'adamw'],
+                   help='Optimizer used only for the controlled final subset retrain.')
+    p.add_argument('--weight_decay',   default=5e-4,        type=float)
+    p.add_argument('--beta1',          default=0.9,         type=float)
+    p.add_argument('--beta2',          default=0.999,       type=float)
+    p.add_argument('--adam_eps',       default=1e-8,        type=float)
+    p.add_argument('--init_ckpt',      default=None,        type=str,
+                   help='Shared initialization file used by every compared method.')
     p.add_argument('--num_workers',    default=4,           type=int)
     p.add_argument('--download',       action='store_true', default=False)
-    p.add_argument('--scoring_transform', default='train', choices=['train', 'test'],
+    p.add_argument('--scoring_transform', default='test', choices=['train', 'test'],
                    help="Transform applied to the training set when scoring it. "
                         "'train' matches the original KL runs; use the same value "
                         "for every method in a comparison.")
@@ -520,19 +767,25 @@ def base_argparser(description: str):
 # so that accuracy differences trace back to `selected_indices` alone.
 # ─────────────────────────────────────────────────────────────────────────────
 def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, paths):
+    train_generator = torch.Generator().manual_seed(int(args.seed) + 10_000)
     trainloader = DataLoader(
         Subset(trainset, selected_indices),
         batch_size=args.batch_size, shuffle=True, pin_memory=True,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers, generator=train_generator,
     )
     testloader = DataLoader(cfg['testset'], batch_size=args.batch_size, shuffle=False,
                              pin_memory=True, num_workers=args.num_workers)
 
+    # Selection methods consume different random streams. Reset immediately
+    # before construction and use a dedicated loader generator so final
+    # accuracy differs because of the subset, not method-specific RNG use.
+    set_seed(args.seed)
     model = build_model(cfg, cfg['num_classes'], device)
     init_note = load_or_create_init(model, getattr(args, 'init_ckpt', None), logger)
     criterion = nn.CrossEntropyLoss()
     kind = getattr(args, 'retrain_optimizer', 'sgd')
     optimizer = build_optimizer(model.parameters(), kind, args.lr,
+                                weight_decay=getattr(args, 'weight_decay', 5e-4),
                                 betas=(getattr(args, 'beta1', 0.9),
                                        getattr(args, 'beta2', 0.999)),
                                 eps=getattr(args, 'adam_eps', 1e-8))

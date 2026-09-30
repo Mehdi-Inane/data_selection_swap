@@ -19,7 +19,9 @@ weight_decay=5e-4, nesterov, cosine annealing, 300 epochs (CIFAR-10/100)
 import argparse
 import json
 import logging
+import math
 import os
+import time
 import warnings
 
 import torch
@@ -93,7 +95,8 @@ def main() -> None:
     p.add_argument('--seed', '-seed', default=42,         type=int,
                    help='Global random seed.')
     p.add_argument('--dataset',       default='cifar10',
-                   choices=['cifar10', 'cifar100', 'imagenet'])
+                   choices=list(common.DATASETS))
+    p.add_argument('--architecture',  default=None, choices=list(common.ARCHITECTURES))
     p.add_argument('--data_dir',      required=True,      type=str,
                    help='Root directory of the dataset.  '
                         'For CIFAR-10/100, this is the folder that contains '
@@ -115,6 +118,16 @@ def main() -> None:
     p.add_argument('--num_epochs',    default=None,       type=int,
                    help='Override the default epoch count for the dataset '
                         '(useful for quick smoke-tests, e.g. --num_epochs 5).')
+    p.add_argument('--selection_only', action='store_true', default=False,
+                   help='Save the final GradMatch subset without the controlled fresh retrain.')
+    p.add_argument('--retrain_optimizer', default='sgd',
+                   choices=['sgd', 'adam', 'adamw'])
+    p.add_argument('--init_ckpt', default=None,
+                   help='Shared initialization for the fresh subset retrain.')
+    p.add_argument('--weight_decay', default=5e-4, type=float)
+    p.add_argument('--beta1', default=0.9, type=float)
+    p.add_argument('--beta2', default=0.999, type=float)
+    p.add_argument('--adam_eps', default=1e-8, type=float)
 
     # ── GradMatch / OMP hyperparameters (paper Appendix C.2–C.3) ─────────────
     p.add_argument('--select_every',  default=20,         type=int,
@@ -138,6 +151,8 @@ def main() -> None:
                         'gradients (class-imbalance setting only).')
 
     args = p.parse_args()
+    if not math.isfinite(args.fraction) or not 0.0 < args.fraction < 1.0:
+        p.error('--fraction must be finite and strictly between 0 and 1')
 
     # ── Guard: warn loudly if --linear_layer was forgotten ───────────────────
     if not args.linear_layer:
@@ -155,18 +170,33 @@ def main() -> None:
     common.set_seed(args.seed)
 
     # ── 1. Dataset ────────────────────────────────────────────────────────────
-    cfg         = common.get_dataset_config(args.dataset, args.data_dir, download=args.download)
+    cfg         = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                            architecture=args.architecture)
     NUM_CLASSES = cfg['num_classes']
     NUM_EPOCHS  = args.num_epochs if args.num_epochs is not None else cfg['num_epochs']
+    cfg = dict(cfg)
+    cfg['num_epochs'] = NUM_EPOCHS
 
     n_val   = int(0.1 * len(cfg['full_train']))
     n_train = len(cfg['full_train']) - n_val
     budget  = int(args.fraction * n_train)
 
-    base_dir = resolve_base_dir(args.output_dir, args.dataset, budget, args.seed)
+    if args.output_dir:
+        base_dir = resolve_base_dir(args.output_dir, args.dataset, budget, args.seed)
+        paths = {
+            'base_dir': base_dir,
+            'model': os.path.join(base_dir, f'gradmatch_{budget}_model.pth'),
+            'indices': os.path.join(base_dir, f'gradmatch_{budget}_indices.pt'),
+            'metrics': os.path.join(base_dir, f'gradmatch_{budget}_metrics.json'),
+            'timing': os.path.join(base_dir, f'gradmatch_{budget}_timing.json'),
+            'log': os.path.join(base_dir, f'gradmatch_{budget}_training.log'),
+        }
+    else:
+        paths = common.get_save_paths('gradmatch', args.dataset, budget, args.seed)
+        base_dir = paths['base_dir']
 
     # ── 2. Logging ────────────────────────────────────────────────────────────
-    log_path = os.path.join(base_dir, f"gradmatch_{budget}_training.log")
+    log_path = paths['log']
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -188,10 +218,10 @@ def main() -> None:
     BATCH_SIZE = args.batch_size
     LR         = args.lr
 
-    MODEL_SAVE_PATH   = os.path.join(base_dir, f"gradmatch_{budget}_model.pth")
-    INDICES_SAVE_PATH = os.path.join(base_dir, f"gradmatch_{budget}_indices.pt")
+    ADAPTIVE_MODEL_PATH = os.path.join(base_dir, f"gradmatch_{budget}_adaptive_model.pth")
+    INDICES_SAVE_PATH = paths['indices']
     WEIGHTS_SAVE_PATH = os.path.join(base_dir, f"gradmatch_{budget}_weights.pt")
-    METRICS_SAVE_PATH = os.path.join(base_dir, f"gradmatch_{budget}_metrics.json")
+    ADAPTIVE_METRICS_PATH = os.path.join(base_dir, f"gradmatch_{budget}_adaptive_metrics.json")
 
     # ── 3. Reproducible train / val split ────────────────────────────────────
     trainset, valset = random_split(
@@ -252,6 +282,9 @@ def main() -> None:
         f"linear_layer={args.linear_layer}  isValid={args.valid}"
     )
 
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    selection_t0 = time.perf_counter()
     dataloader = GradMatchDataLoader(
         trainloader, valloader, dss_args, logger,
         batch_size=BATCH_SIZE,
@@ -301,8 +334,12 @@ def main() -> None:
             )
 
     # ── 7. Save artefacts ─────────────────────────────────────────────────────
-    torch.save(model.state_dict(), MODEL_SAVE_PATH)
-    logger.info(f"Saved model weights  → {MODEL_SAVE_PATH}")
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    selection_seconds = time.perf_counter() - selection_t0
+
+    torch.save(model.state_dict(), ADAPTIVE_MODEL_PATH)
+    logger.info(f"Saved adaptive-training model weights  → {ADAPTIVE_MODEL_PATH}")
 
     idxes  = torch.tensor(dataloader.subset_indices)
     gammas = torch.tensor(dataloader.subset_weights)
@@ -311,9 +348,24 @@ def main() -> None:
     logger.info(f"Saved subset indices → {INDICES_SAVE_PATH}")
     logger.info(f"Saved subset weights → {WEIGHTS_SAVE_PATH}")
 
-    with open(METRICS_SAVE_PATH, 'w') as f:
-        json.dump(accuracy_history, f, indent=4)
-    logger.info(f"Saved accuracy log   → {METRICS_SAVE_PATH}")
+    common.atomic_json_dump(accuracy_history, ADAPTIVE_METRICS_PATH)
+    common.atomic_json_dump(
+        {
+            'method': 'gradmatch',
+            'selection_seconds': selection_seconds,
+            'phases_seconds': {'extra_training_and_selection': selection_seconds},
+            'reference_epochs_used': 0,
+            'adaptive_training_epochs': NUM_EPOCHS,
+            'device': torch.cuda.get_device_name() if device == 'cuda' else 'cpu',
+        },
+        paths['timing'])
+    logger.info(f"Saved adaptive accuracy log → {ADAPTIVE_METRICS_PATH}")
+
+    # The adaptive model has seen a sequence of changing weighted subsets, so
+    # its accuracy is not the quality of the final saved subset.  Evaluate the
+    # final indices with the same fresh, unweighted retrain used by every other
+    # method; this is the metrics file consumed by the comparison scripts.
+    common.finish(cfg, trainset, idxes, device, args, logger, paths)
     logger.info(f"All artefacts saved to: {base_dir}")
 
 

@@ -163,6 +163,20 @@ class TrajectoryScorer:
         self.gbar_cache_dir = gbar_cache_dir
         self.cache_tag = cache_tag
         self.logger = logger
+        ckpt_identity = []
+        for path in self.ckpt_paths:
+            stat = os.stat(path)
+            ckpt_identity.append({
+                'path': os.path.realpath(path),
+                'size': stat.st_size,
+                'mtime_ns': stat.st_mtime_ns,
+            })
+        self.trajectory_id = common.config_fingerprint({
+            'checkpoints': ckpt_identity,
+            'weights': [float(w) for w in self.weights],
+            'architecture': cfg.get('architecture'),
+            'scoring_transform': scoring_transform,
+        })
 
         pool = common.scoring_subset(cfg, trainset, scoring_transform)
         self.X, self.Y = materialise(pool, device, batch_size, num_workers)
@@ -184,15 +198,25 @@ class TrajectoryScorer:
         cache = None
         if self.gbar_cache_dir and self.cache_tag:
             name = os.path.basename(ckpt_path).replace('.pth', '')
-            cache = os.path.join(self.gbar_cache_dir, f"gbar_{self.cache_tag}_{name}.pt")
+            cache = os.path.join(
+                self.gbar_cache_dir,
+                f"gbar_{self.cache_tag}_{self.trajectory_id}_{name}.pt")
             if os.path.exists(cache):
-                return torch.load(cache, map_location=self.device)
+                cached = torch.load(cache, map_location=self.device)
+                if cached.numel() != self.d:
+                    raise ValueError(
+                        f"Cached gbar has {cached.numel()} coordinates, expected {self.d}: "
+                        f"{cache}"
+                    )
+                return cached
 
         gsum, count = flat_grad_sum(self.model, self.X, self.Y, self.pool_index,
                                     self.batch_size, self.params)
         gbar = gsum / count
         if cache:
-            torch.save(gbar.cpu(), cache)
+            tmp = f"{cache}.tmp.{os.getpid()}"
+            torch.save(gbar.cpu(), tmp)
+            os.replace(tmp, cache)
         return gbar.to(self.device)
 
     def score(self, subsets: dict) -> dict:
