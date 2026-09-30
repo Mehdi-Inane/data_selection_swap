@@ -24,7 +24,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPAT
 if command -v module >/dev/null 2>&1; then
     module load miniconda/3
 fi
-CONDA_ENV="${CONDA_ENV:-gradmatch}"
+CONDA_ENV="${CONDA_ENV:-kl_select}"
 if command -v conda >/dev/null 2>&1; then
     set +u
     conda activate "$CONDA_ENV"

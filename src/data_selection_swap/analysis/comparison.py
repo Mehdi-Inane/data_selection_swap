@@ -233,7 +233,7 @@ def mean_std(values):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # D_alpha scoring
-#   Only imports torch / torchvision / cords on first use, so the plain accuracy/timing table
+#   Only imports torch / torchvision on first use, so the plain accuracy/timing table
 #   (the default) never needs them.
 # ─────────────────────────────────────────────────────────────────────────────
 class ObjectiveScorer:

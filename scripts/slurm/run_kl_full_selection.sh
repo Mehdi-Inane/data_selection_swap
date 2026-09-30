@@ -21,8 +21,9 @@ fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 module load miniconda/3
+CONDA_ENV="${CONDA_ENV:-kl_select}"
 set +u
-conda activate gradmatch
+conda activate "$CONDA_ENV"
 set -u
 
 DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"

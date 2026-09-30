@@ -7,10 +7,8 @@ apricot-select>=0.6.0
 numba>=0.43.0
 scipy>=1.5.0
 scikit-learn
-torch>=1.8.0
+torch>=2.0.0
 torchvision
-# Model factory and maintained GradMatch baseline.
-cords==0.0.4
 tqdm>=4.24.0
 sphinxcontrib-napoleon
 sphinxcontrib-bibtex

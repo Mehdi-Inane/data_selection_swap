@@ -23,8 +23,9 @@ mkdir -p "${PROJECT_ROOT}/logs"
 
 # ── Environment ──────────────────────────────────────────────────────────────
 module load miniconda/3
+CONDA_ENV="${CONDA_ENV:-kl_select}"
 set +u
-conda activate gradmatch
+conda activate "$CONDA_ENV"
 set -u
 
 # ── Experiment Hyperparameters (identical to alg3.sh) ───────────────────────
