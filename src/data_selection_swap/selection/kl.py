@@ -192,6 +192,7 @@ def build_weighted_trajectory(model, X, Y, batch_size, checkpoints, device, use_
     checkpoints, so neither the argmin nor any swap decision changes.
     """
     factors, metrics = [], []
+    weight_name, bias_name = common.classifier_parameter_names(model)
     for c in checkpoints:
         model.load_state_dict(ref.load_weights(c.path))
         L, Phi = extract_factored_features(model, X, Y, batch_size, R_L=R_L,
@@ -199,7 +200,8 @@ def build_weighted_trajectory(model, X, Y, batch_size, checkpoints, device, use_
         factors.append((L.to(device), Phi.to(device)))
         metrics.append(
             ref.adam_metric_factored(c, num_classes, feat_dim, eps=adam_eps, power=2,
-                                     include_bias=include_bias)
+                                     include_bias=include_bias,
+                                     weight_name=weight_name, bias_name=bias_name)
             if use_metric else None)
 
     if use_metric:
@@ -807,7 +809,10 @@ def main():
     num_ckpts_used = len(checkpoints)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir     = f"{scratch_path}/gradmatch_swap/{args.dataset}/{budget}/seed_{args.seed}"
+    base_dir = (
+        f"{scratch_path}/gradmatch_swap/{args.dataset}/{cfg['architecture']}/"
+        f"{budget}/seed_{args.seed}"
+    )
     os.makedirs(base_dir, exist_ok=True)
 
     # ── 2. Logging ───────────────────────────────────────────────────────────

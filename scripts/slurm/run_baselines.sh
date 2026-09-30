@@ -2,7 +2,7 @@
 #SBATCH --job-name=selection_baselines
 #SBATCH --output=baselines_%A_%a.txt
 #SBATCH --error=baselines_%A_%a.txt
-#SBATCH --array=0-139                # 7 methods × 4 fractions × 5 seeds
+#SBATCH --array=0-839                # 2 datasets × 3 archs × 7 methods × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # match run_kl_selection.sh for comparable timing
 #SBATCH --time=15:00:00
@@ -22,8 +22,10 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters (identical to alg3.sh) ───────────────────────
-DATASET="${DATASET_OVERRIDE:-cifar100}"
-ARCHITECTURE="${ARCHITECTURE:-resnet18}"
+DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
+ARCHITECTURE_GRID="${ARCHITECTURES:-${ARCHITECTURE:-resnet18 vgg16 inception}}"
+read -r -a DATASETS <<< "$DATASET_GRID"
+read -r -a ARCHITECTURES <<< "$ARCHITECTURE_GRID"
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 BATCH_SIZE=128
@@ -39,16 +41,24 @@ INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH:-./scratch}/data_selection_swap/init}"
 # to run the same-information variants.
 read -r -a METHODS <<< "${METHODS:-random herding moderate el2n moso graphcut facility_location}"
 
-N_FS=$(( ${#FRACTIONS[@]} * ${#SEEDS[@]} ))
-METHOD=${METHODS[$(( SLURM_ARRAY_TASK_ID / N_FS ))]}
-REM=$(( SLURM_ARRAY_TASK_ID % N_FS ))
-FRACTION=${FRACTIONS[$(( REM / ${#SEEDS[@]} ))]}
-SEED=${SEEDS[$(( REM % ${#SEEDS[@]} ))]}
+N_SEEDS=${#SEEDS[@]}
+N_FRACTIONS=${#FRACTIONS[@]}
+N_METHODS=${#METHODS[@]}
+N_ARCHITECTURES=${#ARCHITECTURES[@]}
+TOTAL_TASKS=$(( ${#DATASETS[@]} * N_ARCHITECTURES * N_METHODS * N_FRACTIONS * N_SEEDS ))
+if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= TOTAL_TASKS )); then
+    echo "Task ${SLURM_ARRAY_TASK_ID} is outside configured grid 0-$((TOTAL_TASKS - 1))." >&2
+    exit 1
+fi
 
-# MoSo full-network per-sample gradients are affordable on CIFAR-100 but not
-# on ImageNet; fall back to the exact last-layer form there.
+IDX=$SLURM_ARRAY_TASK_ID
+SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
+FRACTION=${FRACTIONS[$(( IDX % N_FRACTIONS ))]}; IDX=$(( IDX / N_FRACTIONS ))
+METHOD=${METHODS[$(( IDX % N_METHODS ))]}; IDX=$(( IDX / N_METHODS ))
+ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
+DATASET=${DATASETS[$IDX]}
+
 MOSO_GRAD_SPACE="full"
-[ "$DATASET" = "imagenet" ] && MOSO_GRAD_SPACE="last_layer"
 
 case "$METHOD" in
     random)                      CMD=("${PROJECT_ROOT}/scripts/select/random_selection.py") ;;
@@ -88,7 +98,7 @@ source "${SCRIPT_DIR}/stage_dataset.sh"
 stage_dataset "$DATASET" "$LOCAL_DATA"
 
 echo "=================================================="
-echo " Task $SLURM_ARRAY_TASK_ID | method=$METHOD | dataset=$DATASET | fraction=$FRACTION | seed=$SEED"
+echo " Task $SLURM_ARRAY_TASK_ID | method=$METHOD | dataset=$DATASET | architecture=$ARCHITECTURE | fraction=$FRACTION | seed=$SEED"
 echo " Command: ${CMD[*]}"
 echo "=================================================="
 

@@ -2,7 +2,7 @@
 #SBATCH --job-name=kl_selection
 #SBATCH --output=kl_selection_%A_%a.txt
 #SBATCH --error=kl_selection_%A_%a.txt
-#SBATCH --array=0-19                 # 20 tasks = 1 dataset × 4 fractions × 5 seeds
+#SBATCH --array=0-119                # 2 datasets × 3 archs × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
 #SBATCH --time=15:00:00
@@ -22,8 +22,10 @@ conda activate gradmatch
 set -u
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
-DATASET="cifar100"  # Override with DATASET_OVERRIDE (cifar10/cifar100/mnist/imagenet)
-ARCHITECTURE="${ARCHITECTURE:-resnet18}"
+DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
+ARCHITECTURE_GRID="${ARCHITECTURES:-${ARCHITECTURE:-resnet18 vgg16 inception}}"
+read -r -a DATASETS <<< "$DATASET_GRID"
+read -r -a ARCHITECTURES <<< "$ARCHITECTURE_GRID"
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 
@@ -64,17 +66,20 @@ RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-}"
 # from the same weights. Set INIT_CKPT_DIR="" to opt out.
 INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH:-./scratch}/data_selection_swap/init}"
 
-# ── Map flat task ID → (fraction, seed) ─────────────────────────────
-# Array is 0-19. Divide by 5 for the fraction index, modulo 5 for the seed index.
-if [ -n "${DATASET_OVERRIDE:-}" ]; then
-    DATASET="$DATASET_OVERRIDE"
+# ── Map flat task ID → (dataset, architecture, fraction, seed) ───────────────
+N_SEEDS=${#SEEDS[@]}
+N_FRACTIONS=${#FRACTIONS[@]}
+N_ARCHITECTURES=${#ARCHITECTURES[@]}
+TOTAL_TASKS=$(( ${#DATASETS[@]} * N_ARCHITECTURES * N_FRACTIONS * N_SEEDS ))
+if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= TOTAL_TASKS )); then
+    echo "Task ${SLURM_ARRAY_TASK_ID} is outside configured grid 0-$((TOTAL_TASKS - 1))." >&2
+    exit 1
 fi
-
-FRACTION_IDX=$(( SLURM_ARRAY_TASK_ID / 5 ))
-SEED_IDX=$(( SLURM_ARRAY_TASK_ID % 5 ))
-
-FRACTION=${FRACTIONS[$FRACTION_IDX]}
-SEED=${SEEDS[$SEED_IDX]}
+IDX=$SLURM_ARRAY_TASK_ID
+SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
+FRACTION=${FRACTIONS[$(( IDX % N_FRACTIONS ))]}; IDX=$(( IDX / N_FRACTIONS ))
+ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
+DATASET=${DATASETS[$IDX]}
 
 INIT_ARGS=()
 if [ -n "$INIT_CKPT_DIR" ]; then

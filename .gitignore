@@ -16,3 +16,4 @@ tmp/
 *.log
 *.npy
 *.json
+!scripts/experiments/*.example.json

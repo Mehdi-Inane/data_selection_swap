@@ -177,7 +177,8 @@ def main():
     method = 'moso' if args.source == 'surrogates' else 'moso_trajectory'
     if args.grad_space == 'last_layer':
         method += '_lastlayer'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(
+        method, args.dataset, cfg['architecture'], budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
                 f"source={args.source}  grad_space={args.grad_space}  device={device}")

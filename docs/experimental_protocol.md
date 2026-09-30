@@ -11,10 +11,10 @@ selection-rule-only experiment.
 
 | Component | Setting (source: `data_selection_swap.selection.kl`) |
 |---|---|
-| Data | CIFAR-10 / CIFAR-100 / MNIST / ImageNet, 90/10 train/val `random_split(seed)`; selection pool = the 90% split |
+| Data | Canonical comparison grid: CIFAR-10 / CIFAR-100, 90/10 train/val `random_split(seed)`; selection pool = the 90% split |
 | Budgets | `fraction ∈ {0.1, 0.2, 0.4, 0.5}` of `n_train`, exact size `int(fraction · n_train)` |
 | Seeds | 42–46; the seed fixes the split, the method's randomness and the retrain init |
-| Architecture | One declared model per comparison cell: ResNet-18, ResNet-34, LeNet, or ConvNet |
+| Architecture | Canonical grid: torchvision ResNet-18, VGG-16-BN, or GoogLeNet/Inception. ResNet-34, LeNet, and ConvNet remain available for mh-only controls. |
 | Retraining | Optimizer matched to the score (SGD for uniform/SGD, Adam for Adam), cosine schedule, 300 / 350 epochs, bs 128, unweighted CE |
 | Metric | Final-epoch top-1 test accuracy. Controlled drivers evaluate the official test set once per fit. |
 | Scoring view | `--scoring_transform` — same value for every method (see §4) |
@@ -27,6 +27,13 @@ retraining uses frozen indices, a byte-identical initialization for paired
 cells, and a dedicated shuffle generator. Use `--retrain_optimizer` explicitly
 when holding the retraining optimizer fixed across optimizer-aware scoring
 ablations.
+
+Baseline outputs use
+`data_selection_baselines/<method>/<dataset>/<architecture>/<budget>/seed_<seed>`;
+KL outputs use
+`gradmatch_swap/<dataset>/<architecture>/<budget>/seed_<seed>`. Architecture
+is part of both the manifest and directory identity, so incompatible
+checkpoints or results cannot silently share a comparison cell.
 
 ## 2. What each method is given (its canonical protocol)
 

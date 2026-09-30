@@ -177,9 +177,11 @@ class Checkpoint:
 #   adam objective actually requires a re-run.
 # ─────────────────────────────────────────────────────────────────────────────
 def load_record(path):
-    obj = torch.load(path, map_location='cpu')
+    obj = torch.load(path, map_location='cpu', weights_only=False)
     if isinstance(obj, dict) and 'model' in obj:
         return obj
+    if isinstance(obj, dict) and 'state_dict' in obj:
+        return {'model': obj['state_dict']}
     return {'model': obj}
 
 
@@ -559,6 +561,8 @@ def adam_metric_factored(checkpoint: Checkpoint, num_classes, feat_dim,
         raise ValueError(f"vhat[{weight_name!r}] has shape {tuple(v.shape)}, "
                          f"expected {(num_classes, feat_dim)}.")
     if include_bias:
+        if bias_name is None:
+            raise ValueError("--include_bias but the classifier has no bias parameter.")
         if bias_name not in vhat:
             raise ValueError(f"--include_bias but no second moment for {bias_name!r}.")
         v = torch.cat([v, vhat[bias_name].reshape(num_classes, 1)], dim=1)

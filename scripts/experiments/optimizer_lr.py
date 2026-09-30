@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import os
@@ -47,6 +46,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    import fcntl
+except ImportError:  # Windows: tests/planning still need to import this module.
+    fcntl = None
+    import msvcrt
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -54,7 +59,10 @@ SCHEMA_VERSION = 1
 STAGES = ("reference", "selection", "retrain")
 SCORE_OBJECTIVES = ("uniform", "sgd", "adam")
 KNOWN_DATASETS = ("cifar10", "cifar100", "mnist", "imagenet")
-KNOWN_ARCHITECTURES = ("resnet18", "resnet34", "lenet", "convnet")
+KNOWN_ARCHITECTURES = (
+    "resnet18", "vgg16", "inception",
+    "resnet34", "lenet", "convnet",
+)
 
 
 def _source_fingerprint() -> str:
@@ -320,12 +328,13 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def _task_id(stage: str, identity: dict[str, Any]) -> str:
-    return f"{stage[:3]}-{_short_hash({
+    payload = {
         'schema': SCHEMA_VERSION,
         'source_fingerprint': SOURCE_FINGERPRINT,
         'stage': stage,
         **identity,
-    })}"
+    }
+    return f"{stage[:3]}-{_short_hash(payload)}"
 
 
 def reference_tasks(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -550,8 +559,15 @@ def _task_lock(final_dir: Path):
     lock_path = final_dir.parent / f".{final_dir.name}.lock"
     with lock_path.open("a+", encoding="utf-8") as handle:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                if handle.tell() == 0:
+                    handle.write("\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, OSError) as exc:
             raise RuntimeError(f"Another process is already running task {final_dir.name}") from exc
         handle.seek(0)
         handle.truncate()
@@ -560,7 +576,11 @@ def _task_lock(final_dir: Path):
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _begin(final_dir: Path, task: dict[str, Any]) -> tuple[Path, Path] | None:

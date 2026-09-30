@@ -93,7 +93,8 @@ def main():
     method = 'el2n' if args.source == 'probes' else 'el2n_trajectory'
     if args.offset:
         method += f'_offset{args.offset}'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(
+        method, args.dataset, cfg['architecture'], budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
                 f"source={args.source}  score_epoch={args.score_epoch}  device={device}")

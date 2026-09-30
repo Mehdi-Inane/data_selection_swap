@@ -99,15 +99,16 @@ def load_json(path):
         return json.load(fh)
 
 
-def run_dir(scratch, method, dataset, budget, seed):
+def run_dir(scratch, method, dataset, architecture, budget, seed):
     if method.startswith('kl_faithful'):
-        return os.path.join(scratch, 'gradmatch_swap', dataset, str(budget), f'seed_{seed}')
-    return os.path.join(scratch, 'data_selection_baselines', method, dataset,
+        return os.path.join(scratch, 'gradmatch_swap', dataset, architecture,
+                            str(budget), f'seed_{seed}')
+    return os.path.join(scratch, 'data_selection_baselines', method, dataset, architecture,
                         str(budget), f'seed_{seed}')
 
 
-def discover_methods(scratch, dataset):
-    kl_root = os.path.join(scratch, 'gradmatch_swap', dataset)
+def discover_methods(scratch, dataset, architecture):
+    kl_root = os.path.join(scratch, 'gradmatch_swap', dataset, architecture)
     kl_pattern = re.compile(
         r'^(kl_faithful(?:_[a-zA-Z0-9]+)*)_\d+_K\d+'
         r'(?:_cfg[0-9a-f]+)?_metrics\.json$')
@@ -121,7 +122,8 @@ def discover_methods(scratch, dataset):
 
     root = os.path.join(scratch, 'data_selection_baselines')
     found = sorted(m for m in os.listdir(root)
-                   if os.path.isdir(os.path.join(root, m, dataset))) if os.path.isdir(root) else []
+                   if os.path.isdir(os.path.join(
+                       root, m, dataset, architecture))) if os.path.isdir(root) else []
     ordered_kl = sorted(kl_methods, key=lambda name: (name != 'kl_faithful', name))
     if not ordered_kl:
         ordered_kl = ['kl_faithful']
@@ -245,7 +247,7 @@ class ObjectiveScorer:
     checkpoints feed the kernel).
     """
 
-    def __init__(self, dataset, data_dir, checkpoint_dir, download,
+    def __init__(self, dataset, architecture, data_dir, checkpoint_dir, download,
                 batch_size, num_workers, proj_dim):
         import torch
         from .. import common as sc
@@ -263,18 +265,21 @@ class ObjectiveScorer:
         self.num_workers = num_workers
         self.proj_dim = proj_dim
         self.dataset = dataset
+        self.architecture = architecture
         self.checkpoint_dir = checkpoint_dir
 
-        self.cfg = self._load_dataset_config(sc, dataset, data_dir, download)
+        self.cfg = self._load_dataset_config(
+            sc, dataset, architecture, data_dir, download)
 
         self._pool_cache   = {}   # seed -> (X, Y, n_train)
         self._traj_cache   = {}   # (seed, K) -> (trajectory, c_sum, n_train)
         self._model = None
 
     @staticmethod
-    def _load_dataset_config(sc, dataset, data_dir, download):
+    def _load_dataset_config(sc, dataset, architecture, data_dir, download):
         try:
-            return sc.get_dataset_config(dataset, data_dir, download=download)
+            return sc.get_dataset_config(
+                dataset, data_dir, download=download, architecture=architecture)
         except RuntimeError as exc:
             raise RuntimeError(
                 f"\n[D_alpha scoring] Could not load {dataset} from --data_dir={data_dir!r} "
@@ -315,8 +320,13 @@ class ObjectiveScorer:
             return self._traj_cache[key]
 
         X, Y, n_train, pool_hash = self._pool(seed)
+        checkpoint_dir = self.checkpoint_dir.format(seed=seed)
+        if not os.path.isfile(os.path.join(checkpoint_dir, self.ref.MANIFEST_NAME)):
+            seeded = os.path.join(checkpoint_dir, f'seed_{seed}')
+            if os.path.isdir(seeded):
+                checkpoint_dir = seeded
         checkpoints, _, _ = self.ref.resolve(
-            self.checkpoint_dir, optimizer='uniform',
+            checkpoint_dir, optimizer='uniform',
             num_checkpoints=k or 0, selection='spread', n_train=n_train,
             batch_size=self.batch_size, num_epochs=self.cfg['num_epochs'],
             expected_dataset=self.dataset, expected_seed=seed,
@@ -349,7 +359,8 @@ class ObjectiveScorer:
         """D_alpha for the subset saved at indices_path, scored on (seed, k)'s trajectory."""
         trajectory, c_sum, n_train = self.trajectory(seed, k)
 
-        indices = self.torch.load(indices_path, map_location='cpu')
+        indices = self.torch.load(
+            indices_path, map_location='cpu', weights_only=False)
         indices = self.torch.as_tensor(indices, dtype=self.torch.long)
         m = int(indices.numel())
         if m == 0:
@@ -370,6 +381,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dataset', default='cifar100', choices=list(N_TRAIN))
+    p.add_argument('--architecture', default='resnet18',
+                   choices=['resnet18', 'vgg16', 'inception'])
     p.add_argument('--fractions', default=[0.1, 0.2, 0.4, 0.5], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--methods', default=None, nargs='+',
@@ -407,26 +420,22 @@ def main():
     p.add_argument('--download', action='store_true', default=False)
     args = p.parse_args()
 
-    ref_path = args.reference_timing or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, 'checkpoints', 'train_time.json')
-    ref = load_json(ref_path)
-    if ref is None:
-        print(f"[WARNING] No reference timing at {ref_path}; 'reference' cost will be NaN.")
-    epoch_seconds = ref['epoch_seconds'] if ref else None
-
     checkpoint_dir = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, 'checkpoints')
+        args.scratch, 'data_selection_swap', args.dataset, args.architecture,
+        'checkpoints')
 
     scorer = None
     if args.data_dir is not None and not args.skip_objective:
-        scorer = ObjectiveScorer(args.dataset, args.data_dir, checkpoint_dir, args.download,
-                                 args.objective_batch_size, args.objective_num_workers,
-                                 args.proj_dim)
+        scorer = ObjectiveScorer(
+            args.dataset, args.architecture, args.data_dir, checkpoint_dir,
+            args.download, args.objective_batch_size,
+            args.objective_num_workers, args.proj_dim)
     else:
         print("[INFO] --data_dir not provided (or --skip_objective set): D_alpha column "
               "will be blank. Pass --data_dir to compute it.")
 
-    methods = args.methods or discover_methods(args.scratch, args.dataset)
+    methods = args.methods or discover_methods(
+        args.scratch, args.dataset, args.architecture)
     warned_methods = set()
     rows = []
     for fraction in args.fractions:
@@ -435,7 +444,18 @@ def main():
             # K -> accumulated (acc, selection_s, reference_s, total_s, obj) lists across seeds
             by_k = {}
             for seed in args.seeds:
-                d = run_dir(args.scratch, method, args.dataset, budget, seed)
+                if args.reference_timing:
+                    ref_path = args.reference_timing.format(seed=seed)
+                else:
+                    ref_path = os.path.join(
+                        args.scratch, 'data_selection_swap', args.dataset,
+                        args.architecture, 'checkpoints', f'seed_{seed}',
+                        'train_time.json')
+                ref = load_json(ref_path)
+                epoch_seconds = ref['epoch_seconds'] if ref else None
+                d = run_dir(
+                    args.scratch, method, args.dataset, args.architecture,
+                    budget, seed)
                 for k, metrics_path, timing_path in discover_runs(d, method, budget):
                     if args.checkpoints is not None and k is not None and k not in args.checkpoints:
                         continue
@@ -496,8 +516,9 @@ def main():
               f"{r['selection_s'][0]:9.1f} ± {r['selection_s'][1]:<8.1f}"
               f"{r['reference_s'][0]:<16.1f}{r['total_s'][0]:<16.1f}")
 
-    out_csv = os.path.join(args.scratch, 'data_selection_baselines',
-                           f'comparison_{args.dataset}.csv')
+    out_csv = os.path.join(
+        args.scratch, 'data_selection_baselines',
+        f'comparison_{args.dataset}_{args.architecture}.csv')
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     with open(out_csv, 'w', newline='') as fh:
         w = csv.writer(fh)
