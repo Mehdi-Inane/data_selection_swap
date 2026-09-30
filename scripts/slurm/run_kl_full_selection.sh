@@ -1,17 +1,23 @@
 #!/bin/bash
 #SBATCH --job-name=kl_full_selection
-#SBATCH --output=kl_full_selection_%A_%a.txt
-#SBATCH --error=kl_full_selection_%A_%a.txt
+#SBATCH --output=logs/kl_full_selection_%A_%a.txt
+#SBATCH --error=logs/kl_full_selection_%A_%a.txt
 #SBATCH --array=0-119
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
-#SBATCH --time=3-00:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --time=15:00:00
 #SBATCH --mem=64Gb
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# sbatch runs a spooled copy of this file, so locate the repo from the
+# submission directory rather than from BASH_SOURCE.
+PROJECT_ROOT="${PROJECT_ROOT:-$(git -C "${SLURM_SUBMIT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || true)}"
+SCRIPT_DIR="${PROJECT_ROOT}/scripts/slurm"
+if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
+    echo "Cannot locate the repository (PROJECT_ROOT='${PROJECT_ROOT}'). Submit from inside the repo or export PROJECT_ROOT." >&2
+    exit 1
+fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 module load miniconda/3
@@ -41,7 +47,7 @@ ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARC
 DATASET=${DATASETS[$IDX]}
 
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH_BASE}/data_selection_swap/init}"
 if [ ! -d "$CHECKPOINT_DIR" ]; then

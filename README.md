@@ -337,8 +337,10 @@ Selection runs save these artifacts:
 
 ## Slurm
 
-The launchers resolve the repository root from their own location and set
-`PYTHONPATH` automatically, so they can be submitted from any directory:
+Slurm runs a spooled copy of each launcher, so the launchers locate the
+repository from the directory `sbatch` was called in (`SLURM_SUBMIT_DIR`) and
+set `PYTHONPATH` automatically. Submit from anywhere inside the repository, or
+export `PROJECT_ROOT=/path/to/data_selection_swap` when submitting elsewhere:
 
 ```bash
 sbatch scripts/slurm/run_full_data.sh

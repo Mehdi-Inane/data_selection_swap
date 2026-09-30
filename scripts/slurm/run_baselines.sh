@@ -10,8 +10,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# sbatch runs a spooled copy of this file, so locate the repo from the
+# submission directory rather than from BASH_SOURCE.
+PROJECT_ROOT="${PROJECT_ROOT:-$(git -C "${SLURM_SUBMIT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || true)}"
+SCRIPT_DIR="${PROJECT_ROOT}/scripts/slurm"
+if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
+    echo "Cannot locate the repository (PROJECT_ROOT='${PROJECT_ROOT}'). Submit from inside the repo or export PROJECT_ROOT." >&2
+    exit 1
+fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
 
@@ -81,6 +87,22 @@ esac
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+case "$DATASET" in
+    cifar10|cifar100) N_FULL=50000 ;;
+    mnist)            N_FULL=60000 ;;
+    imagenet)         N_FULL=1281167 ;;
+    *) echo "Cannot derive the training-pool size for dataset=$DATASET" >&2; exit 1 ;;
+esac
+N_TRAIN=$(( N_FULL - N_FULL / 10 ))
+BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
+RESULT_DIR="${SCRATCH_BASE}/data_selection_baselines/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}"
+RESULT_MODEL="${RESULT_DIR}/${METHOD}_${BUDGET}_model.pth"
+RESULT_METRICS="${RESULT_DIR}/${METHOD}_${BUDGET}_metrics.json"
+if [ -s "$RESULT_MODEL" ] && [ -s "$RESULT_METRICS" ]; then
+    echo "Skipping completed run: $RESULT_DIR"
+    exit 0
+fi
+
 CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
