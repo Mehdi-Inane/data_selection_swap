@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=selection_baselines
-#SBATCH --output=baselines_%A_%a.txt
-#SBATCH --error=baselines_%A_%a.txt
+#SBATCH --output=logs/baselines_%A_%a.txt
+#SBATCH --error=logs/baselines_%A_%a.txt
 #SBATCH --array=0-839                # 2 datasets × 3 archs × 7 methods × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1         # match run_kl_selection.sh for comparable timing
@@ -104,7 +104,7 @@ if [ -s "$RESULT_MODEL" ] && [ -s "$RESULT_METRICS" ]; then
     exit 0
 fi
 
-CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
+CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
