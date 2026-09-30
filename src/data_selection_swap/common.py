@@ -37,11 +37,14 @@ import torchvision.datasets as datasets
 import torchvision.models as tv_models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset, random_split
-
-from cords.utils.models import ResNet18
+from torchvision.models.googlenet import BasicConv2d
 
 DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet')
-ARCHITECTURES = ('resnet18', 'resnet34', 'lenet', 'convnet')
+ARCHITECTURES = (
+    'resnet18', 'vgg16', 'inception',
+    # Retained for the existing mh-only controlled experiments.
+    'resnet34', 'lenet', 'convnet',
+)
 # Backward-compatible default. New code should call ``feature_dim(model)``.
 FEAT_DIM = 512
 
@@ -219,7 +222,8 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
             f"Unknown architecture: {architecture!r}. Choose one of {ARCHITECTURES}."
         )
     if dataset == 'cifar10':
-        mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+        # Match the adapted main-branch baseline configuration exactly.
+        mean, std = (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)
         tf_tr = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -304,12 +308,38 @@ def build_model(cfg: dict, num_classes: int, device: str,
     small_images = bool(cfg.get('small_images', cfg.get('cifar_style', False)))
 
     if architecture == 'resnet18':
-        # Preserve checkpoint compatibility with the original experiments.
-        model = ResNet18(num_classes=num_classes)
-        if small_images or in_channels != 3:
+        # Use the raw torchvision layout so origin/main checkpoints load
+        # strictly without key rewriting.
+        model = tv_models.resnet18(weights=None, num_classes=num_classes)
+        if small_images:
             model.conv1 = nn.Conv2d(
                 in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False)
             model.maxpool = nn.Identity()
+        elif in_channels != 3:
+            model.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    elif architecture == 'vgg16':
+        model = tv_models.vgg16_bn(weights=None, num_classes=num_classes)
+        if in_channels != 3:
+            model.features[0] = nn.Conv2d(
+                in_channels, 64, kernel_size=3, stride=1, padding=1)
+        if small_images:
+            model.avgpool = nn.AdaptiveAvgPool2d(1)
+            model.classifier = nn.Sequential(
+                nn.Linear(512, 512), nn.ReLU(True), nn.Dropout(0.5),
+                nn.Linear(512, num_classes),
+            )
+    elif architecture == 'inception':
+        model = tv_models.googlenet(
+            weights=None, aux_logits=False, init_weights=True,
+            num_classes=num_classes)
+        if small_images:
+            model.conv1 = BasicConv2d(
+                in_channels, 64, kernel_size=3, stride=1, padding=1)
+            model.maxpool1 = nn.Identity()
+        elif in_channels != 3:
+            model.conv1 = BasicConv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3)
     elif architecture == 'resnet34':
         model = TorchvisionResNet(34, in_channels, num_classes, small_images)
     elif architecture == 'lenet':
@@ -326,11 +356,32 @@ def build_model(cfg: dict, num_classes: int, device: str,
 def classifier_layer(model: nn.Module) -> nn.Linear:
     """Return the final linear classifier used by factored-gradient code."""
     layer = getattr(model, 'linear', None)
-    if not isinstance(layer, nn.Linear):
-        raise TypeError(
-            f"{type(model).__name__} does not expose an nn.Linear 'linear' classifier."
-        )
-    return layer
+    if isinstance(layer, nn.Linear):
+        return layer
+    layer = getattr(model, 'fc', None)
+    if isinstance(layer, nn.Linear):
+        return layer
+    classifier = getattr(model, 'classifier', None)
+    if isinstance(classifier, nn.Linear):
+        return classifier
+    if isinstance(classifier, nn.Sequential):
+        for candidate in reversed(classifier):
+            if isinstance(candidate, nn.Linear):
+                return candidate
+    raise TypeError(
+        f"{type(model).__name__} has no supported final nn.Linear classifier."
+    )
+
+
+def classifier_parameter_names(model: nn.Module) -> tuple[str, str | None]:
+    """Return state-dict names for the final classifier weight and bias."""
+    target = classifier_layer(model)
+    for name, module in model.named_modules():
+        if module is target:
+            prefix = f"{name}." if name else ""
+            bias_name = f"{prefix}bias" if target.bias is not None else None
+            return f"{prefix}weight", bias_name
+    raise RuntimeError("Final classifier is not registered in model.named_modules().")
 
 
 def feature_dim(model: nn.Module) -> int:
@@ -418,9 +469,11 @@ def list_checkpoints(checkpoint_dir: str):
 
 def load_model_weights(path: str, map_location='cpu'):
     """Load weights from either a bare state dict or a reference record."""
-    obj = torch.load(path, map_location=map_location)
+    obj = torch.load(path, map_location=map_location, weights_only=False)
     if isinstance(obj, dict) and 'model' in obj:
         return obj['model']
+    if isinstance(obj, dict) and 'state_dict' in obj:
+        return obj['state_dict']
     return obj
 
 
@@ -487,7 +540,8 @@ def load_or_create_init(model: nn.Module, path, logger=None) -> str:
     with open(lock_path, 'a+b') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if os.path.exists(path):
-            model.load_state_dict(torch.load(path, map_location=device))
+            model.load_state_dict(torch.load(
+                path, map_location=device, weights_only=False))
             note = f"initialisation loaded from {path}"
         else:
             tmp = f"{path}.tmp.{os.getpid()}"
@@ -692,9 +746,13 @@ def save_timing(path: str, timer: SelectionTimer, logger, **extra):
 # Save-path / logging convention (one line change — method name — vs.
 # selection.kl's own base_dir / logging setup)
 # ─────────────────────────────────────────────────────────────────────────────
-def get_save_paths(method: str, dataset: str, budget: int, seed: int) -> dict:
+def get_save_paths(method: str, dataset: str, architecture: str,
+                   budget: int, seed: int) -> dict:
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir = f"{scratch_path}/data_selection_baselines/{method}/{dataset}/{budget}/seed_{seed}"
+    base_dir = (
+        f"{scratch_path}/data_selection_baselines/{method}/{dataset}/"
+        f"{architecture}/{budget}/seed_{seed}"
+    )
     os.makedirs(base_dir, exist_ok=True)
     return dict(
         base_dir=base_dir,

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "experiment_name": "cifar_swap_rules",
+  "require_cuda": true,
+  "datasets": ["cifar100"],
+  "architectures": ["resnet18"],
+  "fractions": [0.1],
+  "seeds": [42, 43, 44, 45, 46],
+  "reference": {
+    "optimizer": "sgd",
+    "learning_rate": 0.01,
+    "batch_size": 128,
+    "num_workers": 4,
+    "num_checkpoints": 10,
+    "spacing": "linear",
+    "weight_decay": 0.0005,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "adam_eps": 1e-8,
+    "num_epochs": null
+  },
+  "selection": {
+    "rules": ["ranked", "best"],
+    "score_objective": "sgd",
+    "max_pairs": 0,
+    "num_checkpoints": 10,
+    "checkpoint_selection": "spread",
+    "checkpoint_weighting": "point",
+    "scoring_transform": "test",
+    "include_bias": true,
+    "proj_dim": 0,
+    "max_iters": 2000,
+    "batch_pairs": 8192,
+    "batch_size": 128,
+    "num_workers": 4,
+    "adam_eps": 1e-8
+  },
+  "retraining": {
+    "optimizer": "sgd",
+    "learning_rate": 0.01,
+    "batch_size": 128,
+    "num_workers": 4,
+    "num_epochs": null,
+    "eval_every": 50,
+    "scheduler": "cosine",
+    "weight_decay": 0.0005,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "adam_eps": 1e-8
+  }
+}

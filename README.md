@@ -5,8 +5,10 @@ This repository implements the trajectory-based data-selection framework in
 training subset whose gradients reproduce the full-data gradients along a saved
 training trajectory, then evaluates the subset by retraining a fresh model.
 
-The maintained code supports CIFAR-10, CIFAR-100, MNIST, and ImageNet with
-ResNet-18, ResNet-34, LeNet, and ConvNet architectures. It includes a factored
+The reconciled baseline/KL grid supports CIFAR-10 and CIFAR-100 with torchvision
+ResNet-18, VGG-16-BN, and GoogLeNet/Inception architectures. The mh-only
+MNIST/ImageNet, ResNet-34, LeNet, and ConvNet paths remain available for
+controlled experiments but are not part of that canonical comparison grid. It includes a factored
 last-layer method, a matrix-free full-network method, and Random, Herding,
 Moderate Coreset, EL2N, MoSo, GraphCut, Facility Location, and GradMatch
 baselines. Controlled experiment drivers use seed-matched trajectories, clean
@@ -17,9 +19,9 @@ immutable configuration-hashed artifacts. The common protocol is described in
 The selector is an empirical gradient-discrepancy method for ordinary
 SGD/Adam trajectories. It is not the manuscript's full-batch Langevin process,
 so its reported certificate applies to the implemented quadratic objective,
-not automatically to the manuscript's end-to-end KL theorem. ResNet/ConvNet
+not automatically to the manuscript's end-to-end KL theorem. ResNet/VGG/Inception
 scores use frozen BatchNorm statistics and are explicitly labeled as a
-surrogate; the BN-free LeNet cells are the primary exact per-example controls.
+surrogate; BN-free LeNet cells remain the primary exact per-example controls.
 
 ## Optimizer-aware scoring: SGD and Adam
 
@@ -341,6 +343,7 @@ The launchers resolve the repository root from their own location and set
 ```bash
 sbatch scripts/slurm/run_full_data.sh
 sbatch scripts/slurm/run_kl_selection.sh
+sbatch scripts/slurm/run_kl_full_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
 sbatch scripts/slurm/run_gradmatch_selection.sh

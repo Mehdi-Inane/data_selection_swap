@@ -79,14 +79,15 @@ def final_accuracy(metrics_path):
     return float(metrics[last_epoch])
 
 
-def collect_rows(scratch, dataset, fractions, seeds, methods, checkpoints):
+def collect_rows(scratch, dataset, architecture, fractions, seeds, methods, checkpoints):
     """One row per saved run: (fraction, method, K, seed, indices_path, acc)."""
     rows = []
     for fraction in fractions:
         budget = int(fraction * N_TRAIN[dataset])
         for method in methods:
             for seed in seeds:
-                d = run_dir(scratch, method, dataset, budget, seed)
+                d = run_dir(
+                    scratch, method, dataset, architecture, budget, seed)
                 for k, metrics_path, _ in discover_runs(d, method, budget):
                     if checkpoints is not None and k is not None and k not in checkpoints:
                         continue
@@ -299,17 +300,19 @@ def main():
                         handlers=[logging.StreamHandler(sys.stdout)])
     logger = logging.getLogger('score_subsets')
 
-    methods = args.methods or discover_methods(args.scratch, args.dataset)
+    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
+                                    architecture=args.architecture)
+    architecture = cfg['architecture']
+    methods = args.methods or discover_methods(
+        args.scratch, args.dataset, architecture)
 
-    rows = collect_rows(args.scratch, args.dataset, args.fractions, args.seeds,
-                        methods, args.checkpoints)
+    rows = collect_rows(
+        args.scratch, args.dataset, architecture, args.fractions, args.seeds,
+        methods, args.checkpoints)
     if not rows:
         logger.error(f"No runs found under {args.scratch}. Nothing to score.")
         return
     logger.info(f"Found {len(rows)} saved subsets across {len(methods)} methods.")
-
-    cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
-                                    architecture=args.architecture)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     checkpoint_template = args.checkpoint_dir or os.path.join(
         args.scratch, 'data_selection_swap', args.dataset,
@@ -368,7 +371,8 @@ def main():
 
         subsets = {}
         for i, r in enumerate(seed_rows):
-            idx = torch.load(r['indices_path'], map_location='cpu')
+            idx = torch.load(
+                r['indices_path'], map_location='cpu', weights_only=False)
             idx = torch.as_tensor(idx, dtype=torch.long).reshape(-1)
             if idx.unique().numel() != idx.numel():
                 logger.warning(f"{r['indices_path']} contains duplicate indices; "
@@ -411,7 +415,8 @@ def main():
     print_correlations(correlations(scored, args.fractions, args.seeds), logger)
 
     out_csv = args.out_csv or os.path.join(
-        args.scratch, 'data_selection_baselines', f'd_alpha_{args.dataset}.csv')
+        args.scratch, 'data_selection_baselines',
+        f'd_alpha_{args.dataset}_{architecture}.csv')
     write_csv(out_csv, scored)
     logger.info(f"\nPer-subset results → {out_csv}")
 

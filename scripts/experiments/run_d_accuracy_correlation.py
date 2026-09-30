@@ -81,7 +81,10 @@ from scripts.experiments.d_correlation_common import (  # noqa: E402
 
 
 DATASETS = ("cifar10", "cifar100", "mnist")
-ARCHITECTURES = ("resnet18", "resnet34", "lenet", "convnet")
+ARCHITECTURES = (
+    "resnet18", "vgg16", "inception",
+    "resnet34", "lenet", "convnet",
+)
 SAMPLERS = ("uniform", "stratified", "easy", "hard")
 D_DEFINITION = (
     "sum_{k in recorded checkpoints} w_k || mean_{i:alpha_i=1} grad ell(theta_k,z_i) "

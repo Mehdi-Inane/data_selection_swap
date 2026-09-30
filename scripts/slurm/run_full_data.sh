@@ -2,7 +2,7 @@
 #SBATCH --job-name=train_full_ref
 #SBATCH --output=train_full_ref_%A_%a.txt
 #SBATCH --error=train_full_ref_%A_%a.txt
-#SBATCH --array=0-4
+#SBATCH --array=0-29                 # 2 datasets × 3 architectures × 5 seeds
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:rtx8000:1
 #SBATCH --time=15:00:00
@@ -23,10 +23,22 @@ conda activate gradmatch
 set -u
 
 # ── Parameters ───────────────────────────────────────────────────────────────
-DATASET="${DATASET_OVERRIDE:-cifar100}"
-ARCHITECTURE="${ARCHITECTURE:-resnet18}"
+DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
+ARCHITECTURE_GRID="${ARCHITECTURES:-${ARCHITECTURE:-resnet18 vgg16 inception}}"
+read -r -a DATASETS <<< "$DATASET_GRID"
+read -r -a ARCHITECTURES <<< "$ARCHITECTURE_GRID"
 SEEDS=(42 43 44 45 46)
-SEED=${SEEDS[$SLURM_ARRAY_TASK_ID]}
+N_SEEDS=${#SEEDS[@]}
+N_ARCHITECTURES=${#ARCHITECTURES[@]}
+TOTAL_TASKS=$(( ${#DATASETS[@]} * N_ARCHITECTURES * N_SEEDS ))
+if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= TOTAL_TASKS )); then
+    echo "Task ${SLURM_ARRAY_TASK_ID} is outside configured grid 0-$((TOTAL_TASKS - 1))." >&2
+    exit 1
+fi
+IDX=$SLURM_ARRAY_TASK_ID
+SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
+ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
+DATASET=${DATASETS[$IDX]}
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SAVE_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
 

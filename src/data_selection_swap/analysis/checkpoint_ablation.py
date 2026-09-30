@@ -35,19 +35,20 @@ METHOD = 'kl_faithful'
 # ─────────────────────────────────────────────────────────────────────────────
 # Collect results: fraction -> K -> {acc, selection_s, reference_s, total_s}
 # ─────────────────────────────────────────────────────────────────────────────
-def collect(scratch, dataset, fractions, seeds, checkpoints, ref_path):
-    ref = load_json(ref_path)
-    epoch_seconds = ref['epoch_seconds'] if ref else None
-    if ref is None:
-        print(f"[WARNING] No reference timing at {ref_path}; "
-              f"'reference'/'total' cost will be NaN.")
-
+def collect(scratch, dataset, architecture, fractions, seeds, checkpoints, ref_path):
     results = {}
     for fraction in fractions:
         budget = int(fraction * N_TRAIN[dataset])
         by_k = {}
         for seed in seeds:
-            d = run_dir(scratch, METHOD, dataset, budget, seed)
+            seed_ref_path = ref_path.format(seed=seed)
+            ref = load_json(seed_ref_path)
+            epoch_seconds = ref['epoch_seconds'] if ref else None
+            if ref is None:
+                print(f"[WARNING] No reference timing at {seed_ref_path}; "
+                      f"'reference'/'total' cost will be NaN.")
+            d = run_dir(
+                scratch, METHOD, dataset, architecture, budget, seed)
             for k, metrics_path, timing_path in discover_runs(d, METHOD, budget):
                 if k is None or k not in checkpoints:
                     continue  # skip untagged/legacy runs and any K outside the sweep
@@ -163,6 +164,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dataset', default='cifar100', choices=list(N_TRAIN))
+    p.add_argument('--architecture', default='resnet18',
+                   choices=['resnet18', 'vgg16', 'inception'])
     p.add_argument('--fractions', default=[0.1, 0.2, 0.4, 0.5], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--checkpoints', default=[1, 3, 5, 10, 20], type=int, nargs='+',
@@ -174,17 +177,23 @@ def main():
     args = p.parse_args()
 
     ref_path = args.reference_timing or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, 'checkpoints', 'train_time.json')
+        args.scratch, 'data_selection_swap', args.dataset, args.architecture,
+        'checkpoints', 'seed_{seed}', 'train_time.json')
 
-    results = collect(args.scratch, args.dataset, args.fractions, args.seeds,
-                      args.checkpoints, ref_path)
+    results = collect(
+        args.scratch, args.dataset, args.architecture, args.fractions,
+        args.seeds, args.checkpoints, ref_path)
     print_table(results, args.checkpoints)
 
     out_dir = os.path.join(args.scratch, 'data_selection_baselines', 'checkpoint_ablation')
     save_csv(results, args.checkpoints,
-            os.path.join(out_dir, f'checkpoint_ablation_{args.dataset}.csv'))
+            os.path.join(
+                out_dir,
+                f'checkpoint_ablation_{args.dataset}_{args.architecture}.csv'))
     plot(results, args.checkpoints, args.fractions,
-        os.path.join(out_dir, f'checkpoint_ablation_{args.dataset}.pdf'))
+        os.path.join(
+            out_dir,
+            f'checkpoint_ablation_{args.dataset}_{args.architecture}.pdf'))
 
 
 if __name__ == "__main__":

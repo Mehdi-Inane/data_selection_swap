@@ -571,7 +571,10 @@ def main():
     K = len(checkpoints)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir = f"{scratch_path}/gradmatch_swap/{args.dataset}/{budget}/seed_{args.seed}"
+    base_dir = (
+        f"{scratch_path}/gradmatch_swap/{args.dataset}/{cfg['architecture']}/"
+        f"{budget}/seed_{args.seed}"
+    )
     os.makedirs(base_dir, exist_ok=True)
 
     method = f"kl_faithful_full_{cfg['architecture']}" + ref.objective_tag(

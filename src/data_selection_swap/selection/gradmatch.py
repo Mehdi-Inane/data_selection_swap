@@ -192,7 +192,8 @@ def main() -> None:
             'log': os.path.join(base_dir, f'gradmatch_{budget}_training.log'),
         }
     else:
-        paths = common.get_save_paths('gradmatch', args.dataset, budget, args.seed)
+        paths = common.get_save_paths(
+            'gradmatch', args.dataset, cfg['architecture'], budget, args.seed)
         base_dir = paths['base_dir']
 
     # ── 2. Logging ────────────────────────────────────────────────────────────

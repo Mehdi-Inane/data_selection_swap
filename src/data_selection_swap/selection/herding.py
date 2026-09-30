@@ -87,7 +87,8 @@ def main():
     budget = int(args.fraction * n_train)
 
     method = 'herding' if args.kernel == 'features' else f'herding_{args.kernel}'
-    paths = common.get_save_paths(method, args.dataset, budget, args.seed)
+    paths = common.get_save_paths(
+        method, args.dataset, cfg['architecture'], budget, args.seed)
     logger = common.get_logger(__name__, paths['log'])
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
                 f"kernel={args.kernel}  device={device}")
