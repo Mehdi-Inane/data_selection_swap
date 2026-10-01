@@ -61,6 +61,19 @@ and documented in ``trajectory``: uniform, sgd, adam (the KL
 weighting, w_k = sum eta_s a_s^2 with M_k = D_k^2) and adam_update
 (the squared update mismatch, w_k = sum eta_s^2 a_s^2).
 
+Count sketch (--proj_dim)
+─────────────────────────
+--proj_dim p > 0 replaces every stored aggregate with a count sketch
+R g ∈ R^p (one random bucket and one random sign per coordinate, seed
+--proj_seed). R is linear and has an exact adjoint, so D, the swap
+test and the JVP all run in the sketched coordinates. The tangent is
+Rᵀ(R v); with an Adam metric it is sqrt(M) ⊙ Rᵀ(R (sqrt(M) ⊙ v)), and
+M is read for that checkpoint and dropped rather than kept for all K.
+Acceptance is exact for the sketched objective ||R v||^2, which is what
+the JVP ranks. p = 0 is the exact path above. Sketched runs keep
+checkpoint weights on CPU and move one checkpoint onto the pool's
+device for each backward or JVP.
+
 This is Algorithm 3 over full-network gradients, not the manuscript's
 exact best-swap search. The exact search needs the per-pair curvature
 ||g_j - g_i||^2_M, which is unavailable here for the same reason P is;
@@ -118,6 +131,49 @@ def unflatten(flat, template, order):
     return out
 
 
+class CountSketch:
+    """
+    Implicit Johnson-Lindenstrauss map R: R^d -> R^p.
+
+    One bucket and one sign per coordinate (a count sketch). The map is
+    stored as an index vector, never as a d-by-p matrix. It is linear, so
+    R(sum_i g_i) = sum_i R g_i, and the adjoint satisfies
+    <R x, y> = <x, R^T y> exactly.
+    """
+
+    def __init__(self, dim, proj_dim, seed):
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if proj_dim <= 0:
+            raise ValueError(f"proj_dim must be positive, got {proj_dim}")
+        generator = torch.Generator(device='cpu')
+        generator.manual_seed(int(seed))
+        self.dim = int(dim)
+        self.proj_dim = int(proj_dim)
+        self.seed = int(seed)
+        self.buckets = torch.randint(0, self.proj_dim, (self.dim,),
+                                     generator=generator, dtype=torch.int64)
+        self.signs = (torch.randint(0, 2, (self.dim,), generator=generator,
+                                    dtype=torch.int64) * 2 - 1).to(torch.int8)
+
+    def apply(self, flat):
+        """R @ flat, for a single vector of length d."""
+        if flat.numel() != self.dim:
+            raise ValueError(f"expected {self.dim} entries, got {flat.numel()}")
+        signed = flat * self.signs.to(device=flat.device, dtype=flat.dtype)
+        out = torch.zeros(self.proj_dim, dtype=flat.dtype, device=flat.device)
+        return out.scatter_add_(0, self.buckets.to(flat.device), signed)
+
+    def adjoint(self, sketched):
+        """R^T @ sketched, a vector of length d."""
+        if sketched.numel() != self.proj_dim:
+            raise ValueError(
+                f"expected {self.proj_dim} sketch entries, got {sketched.numel()}")
+        buckets = self.buckets.to(sketched.device)
+        signs = self.signs.to(device=sketched.device, dtype=sketched.dtype)
+        return signs * sketched[buckets]
+
+
 def grad_sum(model, params, buffers, X, Y, index, batch_size, order):
     """sum_{i in index} g_i, flattened, in float64."""
     def loss(p, xb, yb):
@@ -159,35 +215,71 @@ class Trajectory:
     The fp64 vectors are the real cost, ~90 MB each; v_k = u_I^k/m -
     gbar_k is a difference of nearly equal quantities, so fp64 is not
     optional.
+
+    With a count sketch, those fp64 vectors live in R^p instead of R^d
+    and the weights stay on CPU. One checkpoint is staged onto the pool
+    device for the backward or JVP that needs it. An Adam metric is
+    applied as sqrt(M) before the sketch and is not kept resident.
     """
 
     def __init__(self, model, checkpoints, use_metric, X, Y, device,
-                 batch_size, adam_eps=1e-8, logger=None, metric_scale=None):
+                 batch_size, adam_eps=1e-8, logger=None, metric_scale=None,
+                 proj_dim=0, proj_seed=0):
         self.model = model.eval()
         self.X, self.Y = X, Y
         self.batch_size = batch_size
         self.order = [n for n, p in model.named_parameters() if p.requires_grad]
         self.weights = [c.weight for c in checkpoints]
+        self.checkpoints = list(checkpoints)
+        self.named = list(model.named_parameters())
+        self.adam_eps = adam_eps
+        self.use_metric = use_metric
+        self.proj_dim = int(proj_dim)
+        self.proj_seed = int(proj_seed) if self.proj_dim else None
+        if self.proj_dim < 0:
+            raise ValueError(f"proj_dim must be >= 0, got {self.proj_dim}")
+        param_dim = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.sketch = (CountSketch(param_dim, self.proj_dim, int(proj_seed))
+                       if self.proj_dim else None)
+        # Preconditioning is baked into the sketch, so M itself is not stored.
+        self.preconditioned = bool(use_metric and self.sketch is not None)
+        self.weight_device = 'cpu' if self.sketch is not None else device
         self.states, self.metrics, self.gbar = [], [], []
         self.u = None
+        self.metric_scale = 1.0
 
-        named = list(model.named_parameters())
+        if self.preconditioned:
+            # One scale shared by every checkpoint, matching the exact path,
+            # computed without retaining the diagonals.
+            means = [float(ref.adam_metric_flat(c, self.named, eps=adam_eps,
+                                                power=2).mean())
+                     for c in checkpoints]
+            self.metric_scale = (metric_scale if metric_scale is not None
+                                 else max(means))
+            if logger:
+                logger.info(f"Metric M_k = D_k^2 rescaled by 1/{self.metric_scale:.4g} "
+                            f"(global, streamed into the sketch, D is in those units)")
+
+        if logger and self.sketch is not None:
+            logger.info(f"Count sketch R: R^{param_dim} -> R^{self.proj_dim} "
+                        f"(seed {int(proj_seed)}); storing R g, weights on CPU.")
+
         pool = torch.arange(X.shape[0], device=device)
         for c in checkpoints:
-            params, buffers = split_state(model, ref.load_weights(c.path), device)
+            params, buffers = split_state(
+                model, ref.load_weights(c.path), self.weight_device)
             self.states.append((params, buffers))
-            self.metrics.append(
-                ref.adam_metric_flat(c, named, eps=adam_eps, power=2).to(device)
-                if use_metric else None)
+            if use_metric and self.sketch is None:
+                self.metrics.append(
+                    ref.adam_metric_flat(c, self.named, eps=adam_eps, power=2).to(device))
+            else:
+                self.metrics.append(None)
             if logger:
                 logger.info(f"  checkpoint epoch {c.epoch:3d} (step {c.step}): "
                             f"mean gradient over the pool ...")
-            self.gbar.append(
-                grad_sum(self.model, params, buffers, X, Y, pool, batch_size, self.order)
-                / X.shape[0])
+            self.gbar.append(self._reduce(params, buffers, pool, c) / X.shape[0])
 
-        self.metric_scale = 1.0
-        if use_metric:
+        if use_metric and self.sketch is None:
             # (sqrt(vhat)+eps)^-2 spans many orders of magnitude; one scale
             # shared by every checkpoint tames it without disturbing the
             # relative weighting, so no swap decision changes.
@@ -201,17 +293,61 @@ class Trajectory:
     def __len__(self):
         return len(self.states)
 
+    def _stage(self, params, buffers):
+        """One checkpoint on the pool device. Already-resident weights are not copied."""
+        device = self.X.device
+        if next(iter(params.values())).device == device:
+            return params, buffers
+        return ({n: v.to(device) for n, v in params.items()},
+                {n: v.to(device) for n, v in buffers.items()})
+
+    def _sqrt_scaled_metric(self, checkpoint):
+        """sqrt(M_k / scale), loaded for this checkpoint and not retained."""
+        metric = ref.adam_metric_flat(
+            checkpoint, self.named, eps=self.adam_eps, power=2)
+        return (metric / self.metric_scale).sqrt()
+
+    def _reduce(self, params, buffers, index, checkpoint):
+        """
+        sum_{i in index} g_i^k, flattened, in float64.
+
+        With a sketch, the full aggregate is temporary: an Adam metric
+        multiplies it as sqrt(M), then R is applied and the R^d vector
+        is dropped. Without a sketch this is the exact aggregate.
+        """
+        params, buffers = self._stage(params, buffers)
+        total = grad_sum(self.model, params, buffers, self.X, self.Y, index,
+                         self.batch_size, self.order)
+        if self.sketch is None:
+            return total
+        if self.preconditioned:
+            total = total * self._sqrt_scaled_metric(checkpoint).to(
+                device=total.device, dtype=total.dtype)
+        return self.sketch.apply(total)
+
+    def _ranking_direction(self, checkpoint, metric, residual):
+        """
+        Flat tangent whose inner product with g_i is the sketched (or exact)
+        coordinate of dD/dv. Exact path: M v. Sketched path: R^T (R v),
+        or sqrt(M) ⊙ R^T (R (sqrt(M) ⊙ v)) when the metric was folded in.
+        """
+        if self.sketch is None:
+            return residual if metric is None else metric * residual
+        direction = self.sketch.adjoint(residual)
+        if self.preconditioned:
+            direction = direction * self._sqrt_scaled_metric(checkpoint).to(
+                device=direction.device, dtype=direction.dtype)
+        return direction
+
     def set_subset(self, index):
         """Recompute u_I^k from scratch."""
-        self.u = [grad_sum(self.model, p, b, self.X, self.Y, index,
-                           self.batch_size, self.order)
-                  for p, b in self.states]
+        self.u = [self._reduce(p, b, index, c)
+                  for (p, b), c in zip(self.states, self.checkpoints)]
 
     def aggregate(self, index):
         """sum_{i in index} g_i^k for every checkpoint."""
-        return [grad_sum(self.model, p, b, self.X, self.Y, index,
-                         self.batch_size, self.order)
-                for p, b in self.states]
+        return [self._reduce(p, b, index, c)
+                for (p, b), c in zip(self.states, self.checkpoints)]
 
     def residuals(self, m):
         """v_k = u_I^k/m - gbar_k, one at a time: each is ~90 MB in float64."""
@@ -231,7 +367,9 @@ class Trajectory:
         entirely in float64 from the aggregates rather than by summing
         entries of the float32 h. Near convergence the linear and
         curvature terms very nearly cancel, and that difference is
-        exactly what decides acceptance.
+        exactly what decides acceptance. A count sketch stores R(sqrt(M) ⊙ u)
+        with no separate M, so the same formula is the exact change of
+        the sketched objective.
         """
         total = 0.0
         for w, M, v, du in zip(self.weights, self.metrics, self.residuals(m), deltas):
@@ -246,13 +384,18 @@ class Trajectory:
 
         The tangent is normalised before the sweep and the scale restored
         after: v_k is a residual that gets small as the subset improves,
-        and the forward pass runs in the model's float32.
+        and the forward pass runs in the model's float32. Under a count
+        sketch the tangent is the adjoint of the sketched residual, so
+        <g_i, R^T R v> = <R g_i, R v> and h is the exact derivative of
+        the sketched objective.
         """
         h = torch.zeros(self.X.shape[0], dtype=torch.float64, device=self.X.device)
         scratch = torch.empty_like(h)
-        for (params, buffers), w, M, v in zip(self.states, self.weights,
-                                              self.metrics, self.residuals(m)):
-            t = v if M is None else M * v
+        for checkpoint, (params, buffers), w, M, v in zip(
+                self.checkpoints, self.states, self.weights, self.metrics,
+                self.residuals(m)):
+            params, buffers = self._stage(params, buffers)
+            t = self._ranking_direction(checkpoint, M, v)
             norm = float(t.norm())
             if norm == 0.0:
                 continue
@@ -426,6 +569,7 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
         final_certificate = max(0.0, final_D - best_lower_bound)
     final_state_gradient_evaluated = reason != 'max_iters'
     terminal_gamma = gamma if final_state_gradient_evaluated else None
+    proj_dim = int(getattr(traj, "proj_dim", 0) or 0)
     diag = {"algorithm": 3, "rule": "ranked_full_network", "reason": reason,
             "sweeps": sweeps, "attempted_exchanges": attempted_exchanges,
             "accepted_updates": accepted_updates, "swaps": swaps,
@@ -438,9 +582,15 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
                                      if math.isfinite(best_lower_bound) else None),
             "certificate_estimate": final_certificate,
             "certificate_valid": False,
-            "certificate_note": "Gradient ranks use float32 model JVPs; the bound is diagnostic.",
+            "certificate_note": (
+                "Gradient ranks use float32 model JVPs; the bound is diagnostic."
+                + (" D is the count-sketch objective, exact in that space."
+                   if proj_dim else "")),
             "algorithm_3_exact": swaps_per_sweep == 1 and candidates == 1,
-            "decision_dtype": "float64", "centered_acceptance": True}
+            "decision_dtype": "float64", "centered_acceptance": True,
+            "proj_dim": proj_dim,
+            "proj_seed": getattr(traj, "proj_seed", None),
+            "projection": "count_sketch" if proj_dim else "none"}
     history.append({"iteration": accepted_updates, "final": True, **diag})
     if logger:
         gamma_text = "not evaluated" if terminal_gamma is None else f"{terminal_gamma:.3e}"
@@ -527,6 +677,15 @@ def main():
                    help="View the pool is scored through. Default 'test' (clean) so that "
                         'this and the last-layer selector score identical inputs.')
     p.add_argument('--selection_only', action='store_true', default=False)
+    p.add_argument('--proj_dim',       default=0,           type=int,
+                   help='Count-sketch dimension for the full-network aggregates. '
+                        '0 keeps the exact R^d vectors. 4096 is a practical size '
+                        'for ResNet-18 with every CIFAR checkpoint: gbar and u_I '
+                        'live in R^p, the JVP tangent is the sketch adjoint, and '
+                        'acceptance is exact for the sketched objective.')
+    p.add_argument('--proj_seed',      default=0,           type=int,
+                   help='Seed of the count sketch. Independent of --seed so the '
+                        'embedding is shared across data seeds.')
     args = p.parse_args()
 
     common.set_seed(args.seed)
@@ -582,6 +741,8 @@ def main():
         args.momentum_response)
     if args.scoring_transform != 'test':
         method += f'_{args.scoring_transform}view'
+    if args.proj_dim:
+        method += f'_jl{args.proj_dim}'
     if manifest is not None:
         trajectory_identity = {
             'manifest_run_id': manifest.get('run_id'),
@@ -694,14 +855,22 @@ def main():
     # materialised on the device once rather than reloaded per iteration.
     X, Y = d_alpha.materialise(scoring_set, device, batch_size=args.batch_size,
                                num_workers=args.num_workers)
-    logger.info(f"Pool on device: {tuple(X.shape)}  ({X.numel() * 4 / 1e9:.2f} GB).  "
-                f"{n_params/1e6:.1f}M trainable parameters, "
-                f"{3 * K * n_params * 8 / 1e9:.2f} GB of float64 trajectory state.")
+    if args.proj_dim:
+        logger.info(f"Pool on device: {tuple(X.shape)}  ({X.numel() * 4 / 1e9:.2f} GB).  "
+                    f"{n_params/1e6:.1f}M trainable parameters, count sketch "
+                    f"p={args.proj_dim} (seed {args.proj_seed}); aggregates are "
+                    f"{2 * K * args.proj_dim * 8 / 1e6:.1f} MB and checkpoint "
+                    f"weights stay on CPU.")
+    else:
+        logger.info(f"Pool on device: {tuple(X.shape)}  ({X.numel() * 4 / 1e9:.2f} GB).  "
+                    f"{n_params/1e6:.1f}M trainable parameters, "
+                    f"{3 * K * n_params * 8 / 1e9:.2f} GB of float64 trajectory state.")
 
     timer = common.SelectionTimer(device)
     with timer.phase('scoring'):
         traj = Trajectory(model, checkpoints, use_metric, X, Y, device,
-                          args.score_batch_size, adam_eps=args.adam_eps, logger=logger)
+                          args.score_batch_size, adam_eps=args.adam_eps, logger=logger,
+                          proj_dim=args.proj_dim, proj_seed=args.proj_seed)
 
     logger.info(f"Running gradient-ranked single-swap descent over all parameters "
                 f"(swaps_per_sweep={args.swaps_per_sweep}, "
@@ -742,7 +911,10 @@ def main():
                        checkpoint_weighting=args.checkpoint_weighting,
                        checkpoint_steps=[c.step for c in checkpoints],
                        checkpoint_weights=[c.weight for c in checkpoints],
-                       num_checkpoints_used=K)
+                       num_checkpoints_used=K,
+                       proj_dim=args.proj_dim,
+                       proj_seed=args.proj_seed if args.proj_dim else None,
+                       projection='count_sketch' if args.proj_dim else 'none')
     common.atomic_json_dump(history, paths['objective'])
 
     # The pool, the float64 trajectory state and K sets of weights are all

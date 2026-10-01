@@ -47,6 +47,14 @@ selection_package.__path__ = []
 common = types.ModuleType(f"{PACKAGE}.common")
 common.ranked_pairs = _ranked_pairs
 objective = types.ModuleType(f"{PACKAGE}.objective")
+
+
+def _weighted_sq_norm(v, metric=None):
+    sq = v * v
+    return float((sq if metric is None else sq * metric).sum().item())
+
+
+objective.weighted_sq_norm = _weighted_sq_norm
 trajectory = types.ModuleType(f"{PACKAGE}.trajectory")
 sys.modules.update({
     PACKAGE: package,
@@ -263,6 +271,167 @@ class FullNetworkSwapTest(unittest.TestCase):
                             for a, b in zip(estimates, estimates[1:])))
         self.assertEqual(diag["decision_dtype"], "float64")
         self.assertTrue(diag["centered_acceptance"])
+        self.assertEqual(diag["projection"], "none")
+        self.assertEqual(diag["proj_dim"], 0)
+
+
+class CountSketchTest(unittest.TestCase):
+    def test_adjoint_linearity_and_determinism(self):
+        sketch = kl_full.CountSketch(32, 7, seed=3)
+        again = kl_full.CountSketch(32, 7, seed=3)
+        other = kl_full.CountSketch(32, 7, seed=4)
+        generator = torch.Generator().manual_seed(11)
+        x = torch.randn(32, dtype=torch.float64, generator=generator)
+        z = torch.randn(32, dtype=torch.float64, generator=generator)
+        y = torch.randn(7, dtype=torch.float64, generator=generator)
+
+        torch.testing.assert_close(sketch.apply(x), again.apply(x))
+        self.assertFalse(torch.equal(sketch.apply(x), other.apply(x)))
+        torch.testing.assert_close(sketch.apply(x + z), sketch.apply(x) + sketch.apply(z))
+        left = torch.dot(sketch.apply(x), y)
+        right = torch.dot(x, sketch.adjoint(y))
+        torch.testing.assert_close(left, right)
+
+
+class _Ckpt:
+    def __init__(self, path, weight):
+        self.path = path
+        self.weight = weight
+        self.epoch = 1
+        self.step = 1
+
+
+def _per_example_grads(model, state, X, Y, order):
+    model.load_state_dict(state)
+    grads = []
+    for i in range(X.shape[0]):
+        model.zero_grad(set_to_none=True)
+        torch.nn.functional.cross_entropy(model(X[i:i + 1]), Y[i:i + 1]).backward()
+        named = dict(model.named_parameters())
+        grads.append(torch.cat([named[n].grad.reshape(-1) for n in order]).double())
+    return torch.stack(grads)
+
+
+def _linear_pool(n=12, d=4, classes=3, seed=19):
+    generator = torch.Generator().manual_seed(seed)
+    model = torch.nn.Linear(d, classes)
+    with torch.no_grad():
+        first = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        model.weight.add_(0.7)
+        model.bias.add_(-0.4)
+        second = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    bank = {"a": first, "b": second}
+    X = torch.randn(n, d, generator=generator)
+    Y = torch.randint(0, classes, (n,), generator=generator)
+    checkpoints = [_Ckpt("a", 0.25), _Ckpt("b", 0.75)]
+    return model, bank, X, Y, checkpoints
+
+
+class SketchedTrajectoryTest(unittest.TestCase):
+    def setUp(self):
+        self._saved_loader = getattr(trajectory, "load_weights", None)
+        self._saved_metric = getattr(trajectory, "adam_metric_flat", None)
+
+    def tearDown(self):
+        if self._saved_loader is None:
+            if hasattr(trajectory, "load_weights"):
+                del trajectory.load_weights
+        else:
+            trajectory.load_weights = self._saved_loader
+        if self._saved_metric is None:
+            if hasattr(trajectory, "adam_metric_flat"):
+                del trajectory.adam_metric_flat
+        else:
+            trajectory.adam_metric_flat = self._saved_metric
+
+    def _trajectory(self, proj_dim, use_metric=False, device="cpu"):
+        model, bank, X, Y, checkpoints = _linear_pool()
+
+        def load_weights(path):
+            return {k: v.detach().clone() for k, v in bank[path].items()}
+
+        trajectory.load_weights = load_weights
+        X = X.to(device)
+        Y = Y.to(device)
+        traj = kl_full.Trajectory(
+            model, checkpoints, use_metric, X, Y, device, batch_size=5,
+            proj_dim=proj_dim, proj_seed=2)
+        grads = [_per_example_grads(model, bank[c.path], X.cpu(), Y.cpu(), traj.order)
+                 for c in checkpoints]
+        return traj, grads, checkpoints
+
+    def _explicit_D(self, traj, grads, checkpoints, index, precondition=None):
+        m = int(index.numel())
+        total = 0.0
+        for weight, G in zip((c.weight for c in checkpoints), grads):
+            residual = G[index].sum(dim=0) / m - G.mean(dim=0)
+            if precondition is not None:
+                residual = precondition * residual
+            if traj.sketch is not None:
+                residual = traj.sketch.apply(residual)
+            total += weight * float((residual * residual).sum())
+        return total
+
+    def test_sketched_D_matches_explicit_projection_and_descends(self):
+        traj, grads, checkpoints = self._trajectory(proj_dim=8)
+        index = torch.tensor([0, 2, 5, 7])
+        traj.set_subset(index)
+        self.assertEqual(tuple(traj.u[0].shape), (8,))
+        self.assertEqual(traj.weight_device, "cpu")
+        self.assertEqual(
+            next(iter(traj.states[0][0].values())).device.type, "cpu")
+        sketched = traj.D(index.numel())
+        expected = self._explicit_D(traj, grads, checkpoints, index)
+        self.assertAlmostEqual(sketched, expected, places=5)
+
+        _, history, diag = kl_full.gradient_ranked_single_swap(
+            traj, 4, max_iters=15, seed=1)
+        self.assertLess(diag["D"], history[0]["D"])
+        self.assertEqual(diag["projection"], "count_sketch")
+        self.assertEqual(diag["proj_dim"], 8)
+        self.assertEqual(diag["proj_seed"], 2)
+        self.assertGreater(diag["swaps"], 0)
+
+    def test_unsketched_aggregate_matches_full_residual(self):
+        traj, grads, checkpoints = self._trajectory(proj_dim=0)
+        index = torch.tensor([1, 3, 4, 8])
+        traj.set_subset(index)
+        self.assertIsNone(traj.sketch)
+        self.assertEqual(tuple(traj.gbar[0].shape), (grads[0].shape[1],))
+        self.assertEqual(tuple(traj.u[0].shape), (grads[0].shape[1],))
+        self.assertAlmostEqual(
+            traj.D(index.numel()),
+            self._explicit_D(traj, grads, checkpoints, index),
+            places=5)
+
+    def test_preconditioned_sketch_matches_explicit_metric(self):
+        def adam_metric_flat(checkpoint, named_params, eps=1e-8, power=2):
+            pieces = []
+            for name, param in named_params:
+                base = 0.5 + (sum(ord(ch) for ch in name) % 5) / 10
+                pieces.append(torch.linspace(base, base + 1.5, param.numel(),
+                                             dtype=torch.float64))
+            return torch.cat(pieces)
+
+        trajectory.adam_metric_flat = adam_metric_flat
+        traj, grads, checkpoints = self._trajectory(proj_dim=8, use_metric=True)
+        self.assertTrue(traj.preconditioned)
+        self.assertTrue(all(M is None for M in traj.metrics))
+        index = torch.tensor([0, 4, 6, 9])
+        traj.set_subset(index)
+        metric = adam_metric_flat(checkpoints[0], traj.named)
+        sqrt_m = (metric / traj.metric_scale).sqrt()
+        sketched = traj.D(index.numel())
+        expected = self._explicit_D(
+            traj, grads, checkpoints, index, precondition=sqrt_m)
+        self.assertAlmostEqual(sketched, expected, places=5)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA to check CPU offload")
+    def test_sketched_weights_stay_on_cpu_when_pool_is_on_gpu(self):
+        traj, _, _ = self._trajectory(proj_dim=4, device="cuda")
+        self.assertEqual(next(iter(traj.states[0][0].values())).device.type, "cpu")
+        self.assertEqual(traj.gbar[0].device.type, "cuda")
+        self.assertEqual(traj.gbar[0].numel(), 4)
 
 
 if __name__ == "__main__":

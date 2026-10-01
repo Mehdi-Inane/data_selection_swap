@@ -69,7 +69,7 @@ if [ -n "${RETRAIN_OPTIMIZER:-}" ]; then
     RETRAIN_ARGS=(--retrain_optimizer "$RETRAIN_OPTIMIZER")
 fi
 
-echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION seed=$SEED"
+echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION seed=$SEED proj_dim=${PROJ_DIM:-0}"
 srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
@@ -89,5 +89,7 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --num_workers 4 \
     --download \
     --scoring_transform "${SCORING_TRANSFORM:-test}" \
+    --proj_dim "${PROJ_DIM:-0}" \
+    --proj_seed "${PROJ_SEED:-0}" \
     "${RETRAIN_ARGS[@]}" \
     "${INIT_ARGS[@]}"
