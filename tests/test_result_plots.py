@@ -65,15 +65,48 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             result_plots.write_table(path, rows, scoring, "cifar10", "resnet18")
             tex = Path(result_plots.latex_path_for(path)).read_text(encoding="utf-8")
             self.assertIn(r"\begin{tabular}", tex)
-            self.assertIn("15.00", tex)
+            self.assertIn(r"\textbf{85.00}", tex)
             self.assertIn("1.25", tex)
             self.assertIn(r"kl\_faithful", tex)
             self.assertNotIn("kl_faithful", tex)
+            self.assertNotIn("Seed", tex)
             rows[0]["d"] = None
             result_plots.attach_cached_d(rows, path, scoring)
             self.assertAlmostEqual(rows[0]["d"], 1.25)
             result_plots.attach_cached_d(rows, path, scoring + "|other")
             self.assertIsNone(rows[0]["d"])
+
+    def test_latex_averages_seeds_and_bolds_the_best_accuracy(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = str(Path(scratch) / "d_exact.csv")
+            scoring = "cifar10|resnet18|unused"
+            rows = [
+                dict(fraction=0.1, budget=4500, method="random", k=None,
+                     seed=42, error=20.0, selection_s=1.0, indices_path="a", d=None),
+                dict(fraction=0.1, budget=4500, method="random", k=None,
+                     seed=43, error=10.0, selection_s=3.0, indices_path="b", d=None),
+                dict(fraction=0.1, budget=4500, method="kl_faithful", k=10,
+                     seed=42, error=30.0, selection_s=5.0, indices_path="c", d=None),
+                dict(fraction=0.1, budget=4500, method="kl_faithful", k=10,
+                     seed=43, error=20.0, selection_s=7.0, indices_path="d", d=None),
+            ]
+            result_plots.write_table(path, rows, scoring, "cifar10", "resnet18")
+            tex = Path(result_plots.latex_path_for(path)).read_text(encoding="utf-8")
+            self.assertIn(r"\textbf{85.00}", tex)
+            self.assertIn("75.00", tex)
+            self.assertNotIn(r"\textbf{75.00}", tex)
+            self.assertNotIn("& 42 &", tex)
+            self.assertNotIn("& 43 &", tex)
+
+            kl_path = result_plots.latex_path_for(path, "_kl")
+            result_plots.write_latex(
+                kl_path, [row for row in rows if result_plots.is_kl_method(row["method"])],
+                "cifar10", "resnet18", kl_only=True)
+            kl_tex = Path(kl_path).read_text(encoding="utf-8")
+            self.assertIn(r"kl\_faithful", kl_tex)
+            self.assertNotIn("random", kl_tex)
+            self.assertIn(r"\textbf{75.00}", kl_tex)
+            self.assertIn("KL selectors only", kl_tex)
 
 
 if __name__ == "__main__":
