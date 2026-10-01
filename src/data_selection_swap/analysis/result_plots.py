@@ -162,11 +162,15 @@ def _blank(value):
     return value
 
 
-def latex_path_for(csv_path):
+def latex_path_for(csv_path, suffix=''):
     root, ext = os.path.splitext(csv_path)
-    if ext.lower() == '.csv':
-        return root + '.tex'
-    return csv_path + '.tex'
+    if ext.lower() != '.csv':
+        root = csv_path
+    return root + suffix + '.tex'
+
+
+def is_kl_method(method):
+    return str(method).startswith('kl_faithful')
 
 
 def _latex_escape(text):
@@ -188,31 +192,74 @@ def _latex_number(value, spec):
     return format(number, spec)
 
 
-def write_latex(path, rows, dataset, architecture):
-    """Booktabs table of the per-subset CSV, without paths or the scoring id."""
+def _mean_finite(values):
+    kept = [float(value) for value in values if _finite(value)]
+    if not kept:
+        return None
+    return float(np.mean(kept))
+
+
+def summarize_for_latex(rows):
+    """One record per method, K, and budget: means over seeds. Accuracy is ``100 - error``."""
+    buckets = {}
+    for row in rows:
+        key = (row['method'], row['k'], row['budget'])
+        bucket = buckets.setdefault(key, {'acc': [], 'selection_s': [], 'd': []})
+        if _finite(row.get('error')):
+            bucket['acc'].append(100.0 - float(row['error']))
+        if _finite(row.get('selection_s')):
+            bucket['selection_s'].append(float(row['selection_s']))
+        if _finite(row.get('d')):
+            bucket['d'].append(float(row['d']))
+    summary = []
+    for (method, k, budget), bucket in buckets.items():
+        summary.append(dict(
+            method=method, k=k, budget=budget,
+            accuracy=_mean_finite(bucket['acc']),
+            selection_s=_mean_finite(bucket['selection_s']),
+            d=_mean_finite(bucket['d']),
+        ))
+    best = {}
+    for item in summary:
+        if not _finite(item['accuracy']):
+            continue
+        shown = round(item['accuracy'], 2)
+        best[item['budget']] = shown if item['budget'] not in best else max(best[item['budget']], shown)
+    for item in summary:
+        shown = round(item['accuracy'], 2) if _finite(item['accuracy']) else None
+        item['best'] = shown is not None and shown == best.get(item['budget'])
+    summary.sort(key=lambda item: (
+        item['budget'], item['method'], item['k'] is None, item['k'] or 0))
+    return summary
+
+
+def write_latex(path, rows, dataset, architecture, kl_only=False):
+    """Booktabs table of seed-averaged accuracy. The best accuracy at each budget is bold."""
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    ordered = sorted(rows, key=lambda row: (
-        row['method'], row['k'] is None, row['k'] or 0, row['budget'], row['seed']))
+    scope = 'KL selectors only' if kl_only else 'all methods'
+    caption = (r'Mean test accuracy over seeds (' + scope + ') for '
+               + _latex_escape(dataset) + ' / ' + _latex_escape(architecture) + '.')
     lines = [
         r'\begin{table}',
         r'\centering',
-        (r'\caption{Saved subset results for ' + _latex_escape(dataset) + ' / '
-         + _latex_escape(architecture) + '.}'),
-        r'\begin{tabular}{llrrrrr}',
+        r'\caption{' + caption + '}',
+        r'\begin{tabular}{llrrrr}',
         r'\toprule',
-        r'Method & $K$ & Seed & Budget & Error (\%) & Time (s) & $D$ \\',
+        r'Method & $K$ & Budget & Accuracy (\%) & Time (s) & $D$ \\',
         r'\midrule',
     ]
-    for row in ordered:
-        k = '--' if row['k'] is None else str(int(row['k']))
+    for item in summarize_for_latex(rows):
+        k = '--' if item['k'] is None else str(int(item['k']))
+        accuracy = _latex_number(item['accuracy'], '.2f')
+        if item['best'] and accuracy != '--':
+            accuracy = r'\textbf{' + accuracy + '}'
         lines.append(' & '.join([
-            _latex_escape(row['method']),
+            _latex_escape(item['method']),
             k,
-            str(int(row['seed'])),
-            str(int(row['budget'])),
-            _latex_number(row.get('error'), '.2f'),
-            _latex_number(row.get('selection_s'), '.1f'),
-            _latex_number(row.get('d'), '.4g'),
+            str(int(item['budget'])),
+            accuracy,
+            _latex_number(item['selection_s'], '.1f'),
+            _latex_number(item['d'], '.4g'),
         ]) + r' \\')
     lines.extend([
         r'\bottomrule',
@@ -508,6 +555,19 @@ def main(argv=None):
     logger.info(f"LaTeX table -> {latex_path_for(cache_path)}")
 
     prefix = f"{args.dataset} / {args.architecture}"
+    kl_rows = [row for row in rows if is_kl_method(row['method'])]
+    if kl_rows:
+        kl_tex = latex_path_for(cache_path, '_kl')
+        write_latex(kl_tex, kl_rows, args.dataset, args.architecture, kl_only=True)
+        logger.info(f"KL-only LaTeX table -> {kl_tex}")
+        plot_vs_budget(
+            group_by_budget(kl_rows, 'error'),
+            f"{prefix}: KL test error vs budget",
+            'Budget (selected points)', 'Mean test error (%)',
+            _figure_path(out_dir, args.dataset, args.architecture, 'kl_error_vs_budget'))
+    else:
+        logger.info("No KL runs found; skipping the KL-only plot and table.")
+
     plot_vs_budget(
         group_by_budget(rows, 'error'),
         f"{prefix}: test error vs budget",
