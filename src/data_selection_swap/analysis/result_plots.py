@@ -162,6 +162,68 @@ def _blank(value):
     return value
 
 
+def latex_path_for(csv_path):
+    root, ext = os.path.splitext(csv_path)
+    if ext.lower() == '.csv':
+        return root + '.tex'
+    return csv_path + '.tex'
+
+
+def _latex_escape(text):
+    return (str(text).replace('\\', r'\textbackslash{}')
+            .replace('&', r'\&').replace('%', r'\%').replace('$', r'\$')
+            .replace('#', r'\#').replace('_', r'\_').replace('{', r'\{')
+            .replace('}', r'\}'))
+
+
+def _latex_number(value, spec):
+    if value is None:
+        return '--'
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return '--'
+    if not np.isfinite(number):
+        return '--'
+    return format(number, spec)
+
+
+def write_latex(path, rows, dataset, architecture):
+    """Booktabs table of the per-subset CSV, without paths or the scoring id."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    ordered = sorted(rows, key=lambda row: (
+        row['method'], row['k'] is None, row['k'] or 0, row['budget'], row['seed']))
+    lines = [
+        r'\begin{table}',
+        r'\centering',
+        (r'\caption{Saved subset results for ' + _latex_escape(dataset) + ' / '
+         + _latex_escape(architecture) + '.}'),
+        r'\begin{tabular}{llrrrrr}',
+        r'\toprule',
+        r'Method & $K$ & Seed & Budget & Error (\%) & Time (s) & $D$ \\',
+        r'\midrule',
+    ]
+    for row in ordered:
+        k = '--' if row['k'] is None else str(int(row['k']))
+        lines.append(' & '.join([
+            _latex_escape(row['method']),
+            k,
+            str(int(row['seed'])),
+            str(int(row['budget'])),
+            _latex_number(row.get('error'), '.2f'),
+            _latex_number(row.get('selection_s'), '.1f'),
+            _latex_number(row.get('d'), '.4g'),
+        ]) + r' \\')
+    lines.extend([
+        r'\bottomrule',
+        r'\end{tabular}',
+        r'\end{table}',
+        '',
+    ])
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('\n'.join(lines))
+
+
 def write_table(path, rows, scoring, dataset, architecture):
     """Per-subset table. ``d`` is blank until that subset has been scored."""
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
@@ -183,6 +245,7 @@ def write_table(path, rows, scoring, dataset, architecture):
                 'indices_path': row.get('indices_path') or '',
                 'd_alpha': _blank(row.get('d')),
             })
+    write_latex(latex_path_for(path), rows, dataset, architecture)
 
 
 def load_cached_d(path, scoring):
@@ -442,6 +505,7 @@ def main(argv=None):
         score_missing(rows, args, scoring, cache_path, logger)
     write_table(cache_path, rows, scoring, args.dataset, args.architecture)
     logger.info(f"Per-subset table -> {cache_path}")
+    logger.info(f"LaTeX table -> {latex_path_for(cache_path)}")
 
     prefix = f"{args.dataset} / {args.architecture}"
     plot_vs_budget(

@@ -59,10 +59,16 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             scoring = result_plots.scoring_id(
                 "cifar10", "resnet18", "sgd", "auto", 0, "spread", "point",
                 "test", None)
-            rows = [dict(fraction=0.1, budget=4500, method="random", k=None,
+            rows = [dict(fraction=0.1, budget=4500, method="kl_faithful", k=None,
                          seed=42, error=15.0, selection_s=12.5,
                          indices_path=str(Path(scratch) / "indices.pt"), d=1.25)]
             result_plots.write_table(path, rows, scoring, "cifar10", "resnet18")
+            tex = Path(result_plots.latex_path_for(path)).read_text(encoding="utf-8")
+            self.assertIn(r"\begin{tabular}", tex)
+            self.assertIn("15.00", tex)
+            self.assertIn("1.25", tex)
+            self.assertIn(r"kl\_faithful", tex)
+            self.assertNotIn("kl_faithful", tex)
             rows[0]["d"] = None
             result_plots.attach_cached_d(rows, path, scoring)
             self.assertAlmostEqual(rows[0]["d"], 1.25)
