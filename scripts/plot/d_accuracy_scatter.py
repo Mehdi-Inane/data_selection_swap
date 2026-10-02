@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scatter exact D(alpha) against test accuracy, one point per (seed, method)."""
+"""Scatter sqrt(D(alpha)) against |full − subset| test accuracy."""
 
 from data_selection_swap.analysis.d_accuracy_scatter import main
 

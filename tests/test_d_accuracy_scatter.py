@@ -158,11 +158,18 @@ class CorrelationTest(unittest.TestCase):
         self.assertEqual(stats['n_points'], 4)   # only seed 43 contributed
         self.assertAlmostEqual(stats['within_mean'], -1.0)
 
-    def test_no_usable_seed_reports_nan_and_a_readable_message(self):
+    def test_no_usable_seed_reports_nan(self):
         stats = scatter.correlation([dict(seed=42, d=1.0, acc=80.0)])
         self.assertEqual(stats['n_seeds'], 0)
         self.assertNotEqual(stats['within_mean'], stats['within_mean'])  # NaN
-        self.assertIn('no correlation defined', scatter.correlation_text(stats))
+
+    def test_correlation_uses_the_accuracy_gap_when_present(self):
+        # Lower D, smaller gap: Spearman of D against y is +1.
+        points = [dict(seed=42, d=1.0 + i, acc=80.0 - i, y=float(i))
+                  for i in range(4)]
+        stats = scatter.correlation(points)
+        self.assertEqual(stats['n_seeds'], 1)
+        self.assertAlmostEqual(stats['within_mean'], 1.0)
 
 
 class PlotTest(unittest.TestCase):
@@ -185,9 +192,9 @@ class PlotTest(unittest.TestCase):
             self.assertEqual(set(results), {
                 ('cifar10', 'resnet18', 0.1), ('cifar100', 'resnet18', 0.1)})
             self.assertTrue(
-                (out_dir / 'cifar10_resnet18_f0.1_d_vs_accuracy.png').is_file())
+                (out_dir / 'cifar10_resnet18_f0.1_sqrtd_vs_accuracy.pdf').is_file())
             self.assertTrue(
-                (out_dir / 'cifar100_resnet18_f0.1_d_vs_accuracy.png').is_file())
+                (out_dir / 'cifar100_resnet18_f0.1_sqrtd_vs_accuracy.pdf').is_file())
 
         cifar10 = results[('cifar10', 'resnet18', 0.1)]
         self.assertEqual(cifar10['n_seeds'], 3)
@@ -204,12 +211,95 @@ class PlotTest(unittest.TestCase):
         self.assertEqual(results, {})
 
 
+class FullAccuracyGapTest(unittest.TestCase):
+    def test_as_percent_converts_a_fraction_and_leaves_percent_alone(self):
+        self.assertAlmostEqual(scatter.as_percent(0.7549), 75.49)
+        self.assertAlmostEqual(scatter.as_percent(75.49), 75.49)
+        self.assertAlmostEqual(scatter.as_percent(0.0), 0.0)
+        self.assertAlmostEqual(scatter.as_percent(1.0), 100.0)
+
+    def test_load_full_accuracy_reads_final_test_acc_as_percent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'metrics.json'
+            path.write_text('{"final_test_acc": 0.7549, "val_acc": [0.5, 0.6]}',
+                            encoding='utf-8')
+            self.assertAlmostEqual(scatter.load_full_accuracy(path), 75.49)
+
+    def test_load_full_accuracy_falls_back_to_last_val_acc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'metrics.json'
+            path.write_text('{"val_acc": [0.50, 0.72]}', encoding='utf-8')
+            self.assertAlmostEqual(scatter.load_full_accuracy(path), 72.0)
+
+    def test_attach_accuracy_gap_uses_the_shared_checkpoints_metrics(self):
+        rows = [
+            row(method='random', acc=70.0, d_alpha=2.0),
+            row(method='kl_faithful', acc=74.0, d_alpha=1.0),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = (Path(tmp) / 'data_selection_swap' / 'cifar10' / 'resnet18'
+                       / 'checkpoints' / 'metrics.json')
+            metrics.parent.mkdir(parents=True)
+            metrics.write_text('{"final_test_acc": 0.7549}', encoding='utf-8')
+            parsed = scatter.read_rows([write_csv(Path(tmp) / 'd_exact.csv', rows)])
+            scatter.attach_accuracy_gap(parsed, tmp)
+        self.assertAlmostEqual(parsed[0]['full_acc'], 75.49)
+        self.assertAlmostEqual(parsed[0]['y'], abs(75.49 - 70.0))
+        self.assertAlmostEqual(parsed[1]['y'], abs(75.49 - 74.0))
+        self.assertEqual(parsed[0]['full_metrics_path'], str(metrics))
+
+    def test_per_seed_metrics_override_the_shared_file(self):
+        rows = [row(seed=42, acc=70.0), row(seed=43, acc=70.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'data_selection_swap' / 'cifar10' / 'resnet18' / 'checkpoints'
+            (root).mkdir(parents=True)
+            (root / 'metrics.json').write_text('{"final_test_acc": 0.80}', encoding='utf-8')
+            seed_dir = root / 'seed_42'
+            seed_dir.mkdir()
+            (seed_dir / 'metrics.json').write_text(
+                '{"final_test_acc": 0.90}', encoding='utf-8')
+            parsed = scatter.read_rows([write_csv(Path(tmp) / 'd_exact.csv', rows)])
+            scatter.attach_accuracy_gap(parsed, tmp)
+        by_seed = {str(r['seed']): r for r in parsed}
+        self.assertAlmostEqual(by_seed['42']['full_acc'], 90.0)
+        self.assertAlmostEqual(by_seed['43']['full_acc'], 80.0)
+
+    def test_missing_metrics_file_fails_closed(self):
+        rows = [row(acc=70.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = scatter.read_rows([write_csv(Path(tmp) / 'd_exact.csv', rows)])
+            with self.assertRaises(FileNotFoundError):
+                scatter.attach_accuracy_gap(parsed, tmp)
+
+    def test_gap_figure_uses_the_gap_filename(self):
+        rows = []
+        for seed in (42, 43, 44):
+            for i, method in enumerate(['random', 'herding', 'kl_faithful']):
+                rows.append(row(method=method, seed=seed,
+                                d_alpha=1.0 + i, acc=74.0 - i))
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = (Path(tmp) / 'data_selection_swap' / 'cifar10' / 'resnet18'
+                       / 'checkpoints' / 'metrics.json')
+            metrics.parent.mkdir(parents=True)
+            metrics.write_text('{"final_test_acc": 0.80}', encoding='utf-8')
+            parsed = scatter.read_rows([write_csv(Path(tmp) / 'd_exact.csv', rows)])
+            scatter.attach_accuracy_gap(parsed, tmp)
+            out_dir = Path(tmp) / 'plots'
+            results = scatter.plot_all(parsed, str(out_dir))
+            self.assertTrue(
+                (out_dir / 'cifar10_resnet18_f0.1_sqrtd_vs_accuracy_gap.pdf').is_file())
+        # Lower D, higher subset acc, smaller gap -> Spearman +1.
+        self.assertAlmostEqual(results[('cifar10', 'resnet18', 0.1)]['within_mean'], 1.0)
+
+
 class InputExpansionTest(unittest.TestCase):
     def test_directories_globs_and_files_all_resolve_to_csv_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = write_csv(Path(tmp) / 'd_exact_cifar10_resnet18_f0.1.csv', [row()])
             second = write_csv(Path(tmp) / 'd_exact_cifar10_vgg16_f0.1.csv', [row()])
             (Path(tmp) / 'notes.txt').write_text('ignored', encoding='utf-8')
+            (Path(tmp) / 'comparison_cifar100.csv').write_text(
+                'method,acc\nrandom,80\n', encoding='utf-8')
 
             expected = sorted({first, second})
             self.assertEqual(scatter.expand_inputs([tmp]), expected)

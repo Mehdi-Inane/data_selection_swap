@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Scatter sqrt(D(alpha)) against final test accuracy (journal-ready figure).
+"""Scatter sqrt(D(alpha)) against the full-data accuracy gap.
 
 Input is the per-subset table written by ``analysis.score_subsets``: one row
-per ``(dataset, architecture, fraction, method, K, seed)``.
+per ``(dataset, architecture, fraction, method, K, seed)``. The y coordinate
+is the absolute gap between the official full-pool test accuracy and the
+subset's final-epoch test accuracy,
+
+    | acc_full - acc_subset |.
+
+``acc_full`` is read from the full-data trajectory's ``metrics.json``
+(``final_test_acc``, stored as a fraction). Subset accuracies in the scored
+table are already in percent, so the fraction is converted before the
+difference is taken.
 
 One figure per ``(dataset, architecture, fraction)``. Fixing the fraction is
 what makes the x axis meaningful: D falls roughly like 1/m, so subsets of
@@ -11,25 +20,20 @@ different budgets do not share a scale and must not be pooled into one panel.
 Figure
 ──────
 A plain scatter: one marker per (seed, selection method, K), x = sqrt(D),
-y = final test accuracy. The grey band/dashed line mark the range/mean of the
-random draws (the noise floor).
+y = |full - subset| accuracy (percent). The grey band/dashed line mark the
+range/mean of the random draws (the noise floor of D).
 
 The x axis is sqrt(D). This is a monotone transform, so every Spearman value
-is identical to the one computed on D itself.
+is identical to the one computed on D itself. A *positive* Spearman on the
+gap supports the objective: lower D goes with a smaller accuracy drop.
 
-Reported correlation
-────────────────────
-Nothing statistical is drawn on the figure. The Spearman values (within-seed
-mean and std over seeds, plus the seed-centred pooled value) and the
-colour/marker of every series are printed to the terminal, to be reported in
-the text or caption. The legend is off by default (--legend turns it on).
-
-The random draws used for E_U[D] have no accuracy, so they are drawn as a
-vertical band (noise floor) instead of points.
+Nothing statistical is drawn on the figure. The Spearman values and the
+colour/marker of every series are printed to the terminal. The legend is off
+by default (--legend turns it on).
 
 Usage:
     python scripts/plot/d_accuracy_scatter.py \\
-        --input $SCRATCH/data_selection_baselines/d_exact_cifar10_vgg16_f0.1.csv
+        --input $SCRATCH/data_selection_baselines/d_exact_*_f0.1.csv
     python scripts/plot/d_accuracy_scatter.py --input DIR --width double \\
         --formats pdf png --no_title
 """
@@ -37,6 +41,7 @@ Usage:
 import argparse
 import csv
 import glob
+import json
 import logging
 import os
 import sys
@@ -60,7 +65,9 @@ def expand_inputs(inputs):
             raise FileNotFoundError(f"No such file, directory, or glob match: {raw}")
         for match in matches or [raw]:
             if os.path.isdir(match):
-                paths.extend(sorted(glob.glob(os.path.join(match, '*.csv'))))
+                # Only the scorer's tables. The same directory also holds
+                # comparison_*.csv and other aggregators that fail the schema.
+                paths.extend(sorted(glob.glob(os.path.join(match, 'd_exact_*.csv'))))
             else:
                 paths.append(match)
     unique = sorted({os.path.realpath(p) for p in paths})
@@ -74,6 +81,100 @@ def _float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def as_percent(value):
+    """Convert a fraction in [0, 1] to percent; leave values already in percent."""
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"accuracy must be finite, got {value}")
+    if 0.0 <= value <= 1.0:
+        return 100.0 * value
+    return value
+
+
+def full_metrics_candidates(scratch, dataset, architecture, seed=None, template=None):
+    """Locations of the full-pool trajectory's metrics.json, most specific last.
+
+    The user-facing convention is
+    ``$SCRATCH/data_selection_swap/{dataset}/{architecture}/checkpoints/metrics.json``.
+    The maintained launcher also writes a per-seed copy under ``seed_{seed}/``.
+    """
+    if template:
+        return [template.format(
+            scratch=scratch, dataset=dataset, architecture=architecture,
+            seed=seed if seed is not None else '')]
+    root = os.path.join(scratch, 'data_selection_swap', dataset, architecture, 'checkpoints')
+    paths = [os.path.join(root, 'metrics.json')]
+    if seed not in (None, ''):
+        paths.append(os.path.join(root, f'seed_{seed}', 'metrics.json'))
+    return paths
+
+
+def load_full_accuracy(path):
+    """Official full-pool test accuracy, in percent.
+
+    The trajectory file stores ``final_test_acc`` as a fraction (e.g. 0.7549).
+    The last ``val_acc`` entry is used only if that key is missing.
+    """
+    with open(path, encoding='utf-8') as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} is not a metrics object")
+    raw = payload.get('final_test_acc')
+    if raw is None:
+        val = payload.get('val_acc')
+        if isinstance(val, list) and val:
+            raw = val[-1]
+    if raw is None:
+        raise ValueError(f"{path} has no final_test_acc (or val_acc) field")
+    return as_percent(raw)
+
+
+def resolve_full_accuracy(scratch, dataset, architecture, seed=None, template=None,
+                          cache=None):
+    """Return (accuracy_percent, path used). Prefer a per-seed file when both exist."""
+    cache = {} if cache is None else cache
+    key = (dataset, architecture, str(seed), template)
+    if key in cache:
+        return cache[key]
+    tried = []
+    found = None
+    for path in full_metrics_candidates(scratch, dataset, architecture, seed, template):
+        tried.append(path)
+        if os.path.isfile(path):
+            found = path
+    if found is None:
+        raise FileNotFoundError(
+            "No full-data metrics.json for "
+            f"dataset={dataset} architecture={architecture} seed={seed}. "
+            "Expected one of: " + "; ".join(tried))
+    result = (load_full_accuracy(found), found)
+    cache[key] = result
+    return result
+
+
+def attach_accuracy_gap(rows, scratch, template=None):
+    """Set ``y = |acc_full - acc_subset|`` (percent) on every scored row."""
+    cache = {}
+    for row in rows:
+        if row['acc'] is None or not np.isfinite(row['acc']):
+            row['y'] = None
+            row['full_acc'] = None
+            continue
+        full_acc, path = resolve_full_accuracy(
+            scratch, row['dataset'], row['architecture'], row['seed'],
+            template=template, cache=cache)
+        row['full_acc'] = full_acc
+        row['full_metrics_path'] = path
+        row['y'] = abs(full_acc - row['acc'])
+    return rows
+
+
+def plotted_y(row):
+    """Y coordinate: accuracy gap when attached, otherwise subset accuracy."""
+    value = row.get('y', row.get('acc'))
+    return value
 
 
 def read_rows(paths, dataset=None, architecture=None):
@@ -187,26 +288,28 @@ def _spearman(a, b):
 
 
 def correlation(points, min_group=3):
-    """Within-seed Spearman across methods, plus the seed-centred pooled value."""
-    within, pooled_d, pooled_acc = [], [], []
+    """Within-seed Spearman of D against the plotted y (gap, or accuracy)."""
+    within, pooled_d, pooled_y = [], [], []
     for seed in sorted({row['seed'] for row in points}):
         group = [row for row in points if row['seed'] == seed]
         if len(group) < min_group:
             continue
         d = np.array([row['d'] for row in group], dtype=np.float64)
-        acc = np.array([row['acc'] for row in group], dtype=np.float64)
-        rho = _spearman(d, acc)
+        y = np.array([plotted_y(row) for row in group], dtype=np.float64)
+        if not np.all(np.isfinite(y)):
+            continue
+        rho = _spearman(d, y)
         if not np.isfinite(rho):
             continue
         within.append(rho)
         pooled_d.extend(d - d.mean())
-        pooled_acc.extend(acc - acc.mean())
+        pooled_y.extend(y - y.mean())
     return dict(
         within_mean=float(np.mean(within)) if within else float('nan'),
         within_std=(float(np.std(within, ddof=1 if len(within) > 1 else 0))
                     if within else float('nan')),
         n_seeds=len(within),
-        pooled_centred=_spearman(pooled_d, pooled_acc),
+        pooled_centred=_spearman(pooled_d, pooled_y),
         n_points=len(pooled_d),
     )
 
@@ -270,15 +373,19 @@ def assign_styles(series, kl_label, plt):
 # ─────────────────────────────────────────────────────────────────────────────
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
-def figure_stem(dataset, architecture, fraction):
-    return f"{dataset}_{architecture}_f{fraction:g}_sqrtd_vs_accuracy"
+def figure_stem(dataset, architecture, fraction, y_name='accuracy_gap'):
+    return f"{dataset}_{architecture}_f{fraction:g}_sqrtd_vs_{y_name}"
+
+
+def uses_gap(rows):
+    return any(row.get('y') is not None for row in rows)
 
 
 def draw_series(ax, series, styles):
     """One plain marker per (seed, method, K)."""
     for key, rows in series.items():
         st = styles[key]
-        ax.scatter([r['x'] for r in rows], [r['acc'] for r in rows],
+        ax.scatter([r['x'] for r in rows], [plotted_y(r) for r in rows],
                    s=22, color=st['color'], marker=st['marker'],
                    edgecolor='black', linewidth=0.4, alpha=0.9, zorder=3)
 
@@ -328,7 +435,10 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
                 and (not random_x or min(random_x) > 0):
             ax.set_xscale('log')
         ax.set_xlabel(r'$\sqrt{D(\alpha)}$')
-        ax.set_ylabel('Test accuracy (%)')
+        if uses_gap(points):
+            ax.set_ylabel('|full − subset| test accuracy (%)')
+        else:
+            ax.set_ylabel('Test accuracy (%)')
         ax.grid(alpha=0.25, lw=0.4)
 
         if title:
@@ -361,12 +471,19 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
     return stats, entries
 
 
-def plot_all(rows, out_dir, logger, **kwargs):
+def plot_all(rows, out_dir, logger=None, **kwargs):
     """One figure per (dataset, architecture, fraction). Returns their stats."""
+    if logger is None:
+        logger = logging.getLogger('d_accuracy_scatter')
     results = {}
+    y_name = 'accuracy_gap' if uses_gap(rows) else 'accuracy'
+    y_stat = '|full - subset| accuracy' if y_name == 'accuracy_gap' else 'accuracy'
+    support = ('positive = lower D goes with a smaller accuracy drop'
+               if y_name == 'accuracy_gap' else
+               'negative = lower D goes with higher accuracy')
     for key, panel_rows in group_by_panel(rows).items():
         dataset, architecture, fraction = key
-        out_stem = os.path.join(out_dir, figure_stem(dataset, architecture, fraction))
+        out_stem = os.path.join(out_dir, figure_stem(dataset, architecture, fraction, y_name))
         stats, entries = plot_panel(panel_rows, out_stem, **kwargs)
         if stats is None:
             continue
@@ -375,8 +492,7 @@ def plot_all(rows, out_dir, logger, **kwargs):
         logger.info(
             f"\n=== {dataset} / {architecture}, fraction {fraction:g} "
             f"({len(points)} points) -> {out_stem}\n"
-            f"Spearman(D, accuracy)  [identical for sqrt(D); negative = lower D "
-            f"goes with higher accuracy]\n"
+            f"Spearman(D, {y_stat})  [identical for sqrt(D); {support}]\n"
             f"  within seed : {stats['within_mean']:+.3f} ± {stats['within_std']:.3f} "
             f"(over {stats['n_seeds']} seeds)\n"
             f"  pooled, seed-centred : {stats['pooled_centred']:+.3f} "
@@ -417,6 +533,11 @@ def main(argv=None):
                    help='Legend name for the KL-based selection method.')
     p.add_argument('--xscale', choices=['log', 'linear'], default='log',
                    help='x axis scale.')
+    p.add_argument('--full_metrics', default=None,
+                   help='Override path to the full-data metrics.json. May contain '
+                        '{scratch}, {dataset}, {architecture}, {seed}. Default: '
+                        '$SCRATCH/data_selection_swap/{dataset}/{architecture}/'
+                        'checkpoints/metrics.json, then the seed_{seed} child.')
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -429,6 +550,10 @@ def main(argv=None):
     paths = expand_inputs(args.input)
     logger.info(f"Reading {len(paths)} per-subset table(s).")
     rows = read_rows(paths, args.dataset, args.architecture)
+    attach_accuracy_gap(rows, args.scratch, template=args.full_metrics)
+    used = sorted({row['full_metrics_path'] for row in rows if row.get('full_metrics_path')})
+    for path in used:
+        logger.info(f"Full-data accuracy from {path}")
     results = plot_all(rows, out_dir, logger, legend=args.legend, width=args.width,
                        formats=tuple(args.formats), title=not args.no_title,
                        kl_label=args.kl_label, xscale=args.xscale)
