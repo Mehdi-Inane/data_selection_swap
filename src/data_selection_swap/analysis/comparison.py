@@ -91,6 +91,12 @@ N_TRAIN = {
     'imagenet': 1281167 - int(0.1 * 1281167),
 }
 
+# Method label for the fresh random draws that estimate E_U[D]. They carry a D
+# but no accuracy, so consumers of the per-subset tables must filter them out
+# of any D-versus-accuracy pairing. Defined here so that reading those tables
+# does not require importing the torch-dependent scorer that writes them.
+RANDOM_METHOD = '__random_reference__'
+
 
 def load_json(path):
     if not os.path.exists(path):

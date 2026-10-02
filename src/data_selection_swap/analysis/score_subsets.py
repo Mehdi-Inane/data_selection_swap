@@ -62,10 +62,8 @@ from scipy.stats import spearmanr
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
-from .comparison import (N_TRAIN, discover_methods, discover_runs,
-                         indices_path_for, load_json, run_dir)
-
-RANDOM_METHOD = '__random_reference__'
+from .comparison import (N_TRAIN, RANDOM_METHOD, discover_methods,
+                         discover_runs, indices_path_for, load_json, run_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,15 +210,23 @@ def print_correlations(corr, logger):
                     f"{c['pooled_centred']:<20.3f}{c['n_points']:<5}")
 
 
-def write_csv(path, scored):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def default_out_csv(scratch, dataset, architecture, fractions):
+    """Per-subset table path. A single-fraction run carries a fraction tag so
+    that scoring 0.2 afterwards does not overwrite the 0.1 table."""
+    tag = f'_f{fractions[0]:g}' if len(fractions) == 1 else ''
+    return os.path.join(scratch, 'data_selection_baselines',
+                        f'd_exact_{dataset}_{architecture}{tag}.csv')
+
+
+def write_csv(path, scored, dataset, architecture):
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'w', newline='') as fh:
         w = csv.writer(fh)
-        w.writerow(['fraction', 'budget', 'method', 'num_checkpoints_tag', 'seed',
-                    'acc', 'd_alpha', 'd_rel', 'e_u_d', 'indices_path',
-                    'scoring_trajectory'])
+        w.writerow(['dataset', 'architecture', 'fraction', 'budget', 'method',
+                    'num_checkpoints_tag', 'seed', 'acc', 'd_alpha', 'd_rel',
+                    'e_u_d', 'indices_path', 'scoring_trajectory'])
         for r in scored:
-            w.writerow([r['fraction'], r['budget'], r['method'],
+            w.writerow([dataset, architecture, r['fraction'], r['budget'], r['method'],
                         r['k'] if r['k'] is not None else '', r['seed'],
                         '' if r['acc'] is None else r['acc'],
                         r['d'], r['d_rel'], r['e_u_d'],
@@ -292,7 +298,10 @@ def main():
                    help='Cache the full-pool mean gradients here (~90 MB per checkpoint per '
                         'seed). Worth setting if you expect to re-run.')
     p.add_argument('--out_csv', default=None,
-                   help='Default: $SCRATCH/data_selection_baselines/d_alpha_<dataset>.csv')
+                   help='Default: $SCRATCH/data_selection_baselines/'
+                        'd_exact_<dataset>_<architecture>[_f<fraction>].csv. The '
+                        'fraction tag is added when exactly one --fractions value is '
+                        'given, so single-budget tables do not overwrite each other.')
     p.add_argument('--download', action='store_true', default=False)
     args = p.parse_args()
 
@@ -413,10 +422,9 @@ def main():
     print_table(aggregate(scored), logger)
     print_correlations(correlations(scored, args.fractions, args.seeds), logger)
 
-    out_csv = args.out_csv or os.path.join(
-        args.scratch, 'data_selection_baselines',
-        f'd_alpha_{args.dataset}_{architecture}.csv')
-    write_csv(out_csv, scored)
+    out_csv = args.out_csv or default_out_csv(
+        args.scratch, args.dataset, architecture, args.fractions)
+    write_csv(out_csv, scored, args.dataset, architecture)
     logger.info(f"\nPer-subset results → {out_csv}")
 
 
