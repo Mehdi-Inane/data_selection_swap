@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
-"""Scatter exact D(alpha) against final test accuracy, one point per saved run.
+"""Scatter sqrt(D(alpha)) against final test accuracy (journal-ready figure).
 
 Input is the per-subset table written by ``analysis.score_subsets``: one row
-per ``(dataset, architecture, fraction, method, K, seed)``. Unlike
-``analysis.result_plots``, nothing is averaged here — every row becomes its own
-marker, so one figure shows all (seed, selection method) combinations and the
-spread across seeds is visible rather than collapsed into an error bar.
+per ``(dataset, architecture, fraction, method, K, seed)``.
 
 One figure per ``(dataset, architecture, fraction)``. Fixing the fraction is
 what makes the x axis meaningful: D falls roughly like 1/m, so subsets of
 different budgets do not share a scale and must not be pooled into one panel.
 
+Figure
+──────
+A plain scatter: one marker per (seed, selection method, K), x = sqrt(D),
+y = final test accuracy. The grey band/dashed line mark the range/mean of the
+random draws (the noise floor).
+
+The x axis is sqrt(D). This is a monotone transform, so every Spearman value
+is identical to the one computed on D itself.
+
 Reported correlation
 ────────────────────
-Points from one seed share both the 90/10 split and the reference trajectory,
-which gives each seed its own offset in D and in accuracy. A single Spearman
-over every point would therefore partly measure that offset. So the figure is
-annotated with the Spearman computed within each seed across methods (mean and
-standard deviation over seeds), plus a pooled value computed after centring
-both quantities inside each seed. Negative means lower D goes with higher
-accuracy, i.e. the objective ranks subsets the way accuracy does.
+Nothing statistical is drawn on the figure. The Spearman values (within-seed
+mean and std over seeds, plus the seed-centred pooled value) and the
+colour/marker of every series are printed to the terminal, to be reported in
+the text or caption. The legend is off by default (--legend turns it on).
 
-The random draws that ``score_subsets`` uses for E_U[D] have no accuracy, so
-they are excluded from the points and drawn as a vertical reference band
-instead. Their spread is the noise floor: D differences between methods that
-fall inside it are not meaningful.
+The random draws used for E_U[D] have no accuracy, so they are drawn as a
+vertical band (noise floor) instead of points.
 
 Usage:
     python scripts/plot/d_accuracy_scatter.py \\
-        --input $SCRATCH/data_selection_baselines/d_exact_cifar10_resnet18_f0.1.csv
-    python scripts/plot/d_accuracy_scatter.py \\
-        --input $SCRATCH/data_selection_baselines --annotate_seed
+        --input $SCRATCH/data_selection_baselines/d_exact_cifar10_vgg16_f0.1.csv
+    python scripts/plot/d_accuracy_scatter.py --input DIR --width double \\
+        --formats pdf png --no_title
 """
 
 import argparse
@@ -45,9 +46,6 @@ from scipy.stats import spearmanr
 
 from .comparison import RANDOM_METHOD
 from .result_plots import is_kl_method
-
-KL_MARKER = 'D'
-BASELINE_MARKER = 'o'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,8 +85,6 @@ def read_rows(paths, dataset=None, architecture=None):
     """
     rows = []
     for path in paths:
-        # utf-8-sig drops a byte-order mark if the table has been round-tripped
-        # through a spreadsheet; without it the BOM lands in the first fieldname.
         with open(path, newline='', encoding='utf-8-sig') as fh:
             reader = csv.DictReader(fh)
             fields = set(reader.fieldnames or ())
@@ -119,6 +115,7 @@ def read_rows(paths, dataset=None, architecture=None):
                     seed=record.get('seed', ''),
                     acc=_float(record.get('acc')),
                     d=d,
+                    x=float(np.sqrt(max(d, 0.0))),   # plotted coordinate: sqrt(D)
                     e_u_d=_float(record.get('e_u_d')),
                     trajectory=record.get('scoring_trajectory', ''),
                     source=path,
@@ -138,11 +135,7 @@ def group_by_panel(rows):
 
 
 def split_points_and_reference(panel_rows):
-    """Separate the scatter points from the random-draw reference rows.
-
-    A point needs both coordinates, so rows without an accuracy (the random
-    draws, and any run made with --selection_only) cannot be plotted.
-    """
+    """Separate the scatter points from the random-draw reference rows."""
     points = [row for row in panel_rows
               if row['method'] != RANDOM_METHOD
               and row['acc'] is not None and np.isfinite(row['acc'])]
@@ -151,17 +144,21 @@ def split_points_and_reference(panel_rows):
     return points, reference
 
 
-def series_label(method, k):
-    return method if k in (None, '') else f"{method}, K={k}"
+def _k_key(k):
+    """Sort K numerically (1, 4, 10, 15, 20) instead of as strings."""
+    try:
+        return (0, int(k))
+    except (TypeError, ValueError):
+        return (1, 0)
 
 
 def group_by_series(points):
-    """``(method, K)`` -> its points, so the legend has one entry per method."""
+    """``(method, K)`` -> its points: KL methods first, K ascending."""
     series = {}
     for row in points:
         series.setdefault((row['method'], row['k']), []).append(row)
     return dict(sorted(series.items(), key=lambda item: (
-        not is_kl_method(item[0][0]), item[0][0], str(item[0][1]))))
+        not is_kl_method(item[0][0]), item[0][0], _k_key(item[0][1]))))
 
 
 def trajectory_label(panel_rows):
@@ -177,7 +174,7 @@ def trajectory_label(panel_rows):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Correlation
+# Correlation (invariant to the sqrt transform: Spearman is rank-based)
 # ─────────────────────────────────────────────────────────────────────────────
 def _spearman(a, b):
     """Spearman rho, or NaN where it is undefined rather than merely small."""
@@ -190,13 +187,7 @@ def _spearman(a, b):
 
 
 def correlation(points, min_group=3):
-    """Within-seed Spearman across methods, plus the seed-centred pooled value.
-
-    A seed is skipped when it has too few methods, or when its D or its
-    accuracy is constant across them: such a group carries no ranking
-    information for either estimator. ``n_seeds`` counts those that did
-    contribute.
-    """
+    """Within-seed Spearman across methods, plus the seed-centred pooled value."""
     within, pooled_d, pooled_acc = [], [], []
     for seed in sorted({row['seed'] for row in points}):
         group = [row for row in points if row['seed'] == seed]
@@ -220,101 +211,181 @@ def correlation(points, min_group=3):
     )
 
 
-def correlation_text(stats):
-    if not stats['n_seeds']:
-        return ("no correlation defined: no seed has 3+ methods with both "
-                "D and accuracy varying")
-    return (f"Spearman(D, accuracy)\n"
-            f"within seed: {stats['within_mean']:+.3f} ± {stats['within_std']:.3f} "
-            f"({stats['n_seeds']} seeds)\n"
-            f"pooled, seed-centred: {stats['pooled_centred']:+.3f} "
-            f"({stats['n_points']} points)\n"
-            f"negative supports the objective")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Styling
+# ─────────────────────────────────────────────────────────────────────────────
+WIDTHS_IN = {'single': 3.4, 'onehalf': 5.2, 'double': 7.2}   # typical journal columns
+
+# Colour-blind-safe baseline colours (Okabe-Ito subset, no blues: those are KL's).
+BASELINE_COLORS = ['#E69F00', '#009E73', '#D55E00', '#CC79A7', '#8C564B', '#000000']
+BASELINE_MARKERS = ['o', 's', '^', 'v', 'P', 'X', 'h']
+RANDOM_COLOR = '#7F7F7F'
+
+RC = {
+    'font.family': 'serif',
+    'font.serif': ['STIXGeneral', 'DejaVu Serif'],
+    'mathtext.fontset': 'stix',
+    'font.size': 8,
+    'axes.labelsize': 9,
+    'axes.titlesize': 9,
+    'legend.fontsize': 7.5,
+    'xtick.labelsize': 8,
+    'ytick.labelsize': 8,
+    'axes.linewidth': 0.7,
+    'pdf.fonttype': 42,   # embed TrueType fonts (journals reject Type 3)
+    'ps.fonttype': 42,
+}
+
+
+def series_legend_label(method, k, kl_label):
+    if is_kl_method(method):
+        return kl_label if k in (None, '') else f"{kl_label}, $K$={k}"
+    return method.replace('_', ' ')
+
+
+def assign_styles(series, kl_label, plt):
+    """``(method, K)`` -> dict(color, marker, label)."""
+    kl_keys = [key for key in series if is_kl_method(key[0])]
+    other_keys = [key for key in series if not is_kl_method(key[0])]
+    blues = plt.get_cmap('Blues')
+    kl_shades = np.linspace(0.45, 0.95, max(len(kl_keys), 1))
+
+    styles = {}
+    for key, shade in zip(kl_keys, kl_shades):
+        styles[key] = dict(color=blues(shade), marker='D')
+    i = 0
+    for key in other_keys:
+        if key[0] in (RANDOM_METHOD, 'random'):
+            styles[key] = dict(color=RANDOM_COLOR, marker='o')
+            continue
+        styles[key] = dict(color=BASELINE_COLORS[i % len(BASELINE_COLORS)],
+                           marker=BASELINE_MARKERS[i % len(BASELINE_MARKERS)])
+        i += 1
+    for key in series:
+        styles[key]['label'] = series_legend_label(key[0], key[1], kl_label)
+    return styles
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
-def figure_name(dataset, architecture, fraction):
-    return f"{dataset}_{architecture}_f{fraction:g}_d_vs_accuracy.png"
+def figure_stem(dataset, architecture, fraction):
+    return f"{dataset}_{architecture}_f{fraction:g}_sqrtd_vs_accuracy"
 
 
-def plot_panel(panel_rows, out_path, annotate_seed=False):
-    """One figure: a marker per (seed, method), coloured by method."""
+def draw_series(ax, series, styles):
+    """One plain marker per (seed, method, K)."""
+    for key, rows in series.items():
+        st = styles[key]
+        ax.scatter([r['x'] for r in rows], [r['acc'] for r in rows],
+                   s=22, color=st['color'], marker=st['marker'],
+                   edgecolor='black', linewidth=0.4, alpha=0.9, zorder=3)
+
+
+def draw_reference(ax, random_x):
+    if not random_x:
+        return
+    ax.axvspan(min(random_x), max(random_x), color='0.5', alpha=0.15, lw=0, zorder=0)
+    ax.axvline(float(np.mean(random_x)), color='0.4', ls='--', lw=0.8, zorder=1)
+
+
+def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=True,
+               kl_label='KL', xscale='log', legend=False):
+    """One scatter figure.
+
+    Returns ``(stats, entries)``: the correlation stats and, per series,
+    ``(label, hex colour, marker)`` for the caption. ``(None, None)`` if nothing
+    could be drawn.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     dataset = panel_rows[0]['dataset']
     architecture = panel_rows[0]['architecture']
     fraction = panel_rows[0]['fraction']
     points, reference = split_points_and_reference(panel_rows)
     if not points:
-        print(f"Skipping {os.path.basename(out_path)}: no row has both D and accuracy.")
-        return None
+        print(f"Skipping {os.path.basename(out_stem)}: no row has both D and accuracy.")
+        return None, None
 
     series = group_by_series(points)
     stats = correlation(points)
-    cmap = plt.get_cmap('tab20' if len(series) > 10 else 'tab10')
-    colors = [cmap(i % cmap.N) for i in range(len(series))]
+    random_x = [r['x'] for r in reference if np.isfinite(r['x'])]
 
-    fig, ax = plt.subplots(figsize=(9.0, 5.6))
-    for color, ((method, k), rows) in zip(colors, series.items()):
-        ax.scatter([row['d'] for row in rows], [row['acc'] for row in rows],
-                   s=46, alpha=0.85, color=color, edgecolor='black', linewidth=0.4,
-                   marker=KL_MARKER if is_kl_method(method) else BASELINE_MARKER,
-                   label=f"{series_label(method, k)} ({len(rows)} seeds)")
-        if annotate_seed:
-            for row in rows:
-                ax.annotate(str(row['seed']), (row['d'], row['acc']),
-                            textcoords='offset points', xytext=(4, 3), fontsize=6)
+    with plt.rc_context(RC):
+        w = WIDTHS_IN[width]
+        styles = assign_styles(series, kl_label, plt)
+        fig, ax = plt.subplots(figsize=(w, 0.62 * w))
 
-    random_d = [row['d'] for row in reference if np.isfinite(row['d'])]
-    if random_d:
-        ax.axvspan(min(random_d), max(random_d), color='grey', alpha=0.13,
-                   label=f"random draws, D range (n={len(random_d)})")
-        ax.axvline(float(np.mean(random_d)), color='grey', ls='--', lw=1.2,
-                   label='random draws, mean D')
+        draw_reference(ax, random_x)
+        draw_series(ax, series, styles)
+        if xscale == 'log' and all(r['x'] > 0 for r in points) \
+                and (not random_x or min(random_x) > 0):
+            ax.set_xscale('log')
+        ax.set_xlabel(r'$\sqrt{D(\alpha)}$')
+        ax.set_ylabel('Test accuracy (%)')
+        ax.grid(alpha=0.25, lw=0.4)
 
-    if all(row['d'] > 0.0 for row in points) and (not random_d or min(random_d) > 0.0):
-        ax.set_xscale('log')
+        if title:
+            budget = points[0]['budget']
+            budget_text = f", budget {int(budget)}" if budget else ''
+            ax.set_title(f"{dataset} / {architecture}, fraction {fraction:g}"
+                         f"{budget_text}")
 
-    budget = points[0]['budget']
-    budget_text = f", budget {int(budget)}" if budget else ''
-    ax.set_title(f"{dataset} / {architecture}: fraction {fraction:g}{budget_text}")
-    trajectory = trajectory_label(panel_rows)
-    ax.set_xlabel('Exact all-parameter D(alpha)'
-                  + (f"\n{trajectory}" if trajectory else ''))
-    ax.set_ylabel('Final test accuracy (%)')
-    ax.grid(alpha=0.3)
-    ax.text(0.02, 0.02, correlation_text(stats), transform=ax.transAxes,
-            fontsize=8, va='bottom', ha='left',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, lw=0.5))
-    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8)
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-    fig.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    return stats
+        fig.tight_layout()
+        if legend:
+            handles = [Line2D([], [], ls='', marker=styles[k]['marker'], ms=5,
+                              mfc=styles[k]['color'], mec='black', mew=0.5,
+                              label=styles[k]['label']) for k in series]
+            if random_x:
+                handles.append(Patch(facecolor='0.5', alpha=0.25,
+                                     label=f"random draws, range ($n$={len(random_x)})"))
+                handles.append(Line2D([], [], color='0.4', ls='--', lw=0.8,
+                                      label='random draws, mean'))
+            fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, 0.0),
+                       ncol=4 if width != 'single' else 2, frameon=False,
+                       columnspacing=1.2, handletextpad=0.4)
+
+        os.makedirs(os.path.dirname(out_stem) or '.', exist_ok=True)
+        for fmt in formats:
+            fig.savefig(f"{out_stem}.{fmt}", dpi=600 if fmt != 'pdf' else None,
+                        bbox_inches='tight')
+        plt.close(fig)
+    entries = [(styles[k]['label'].replace('$', ''), to_hex(styles[k]['color']),
+                styles[k]['marker']) for k in series]
+    return stats, entries
 
 
-def plot_all(rows, out_dir, annotate_seed=False, logger=None):
+def plot_all(rows, out_dir, logger, **kwargs):
     """One figure per (dataset, architecture, fraction). Returns their stats."""
     results = {}
     for key, panel_rows in group_by_panel(rows).items():
         dataset, architecture, fraction = key
-        out_path = os.path.join(out_dir, figure_name(dataset, architecture, fraction))
-        stats = plot_panel(panel_rows, out_path, annotate_seed=annotate_seed)
+        out_stem = os.path.join(out_dir, figure_stem(dataset, architecture, fraction))
+        stats, entries = plot_panel(panel_rows, out_stem, **kwargs)
         if stats is None:
             continue
         results[key] = stats
-        if logger:
-            points, _ = split_points_and_reference(panel_rows)
-            logger.info(
-                f"{dataset}/{architecture} fraction={fraction:g}: {len(points)} points, "
-                f"within-seed rho={stats['within_mean']:+.3f} ± {stats['within_std']:.3f} "
-                f"over {stats['n_seeds']} seeds, pooled centred rho="
-                f"{stats['pooled_centred']:+.3f} -> {out_path}")
+        points, _ = split_points_and_reference(panel_rows)
+        logger.info(
+            f"\n=== {dataset} / {architecture}, fraction {fraction:g} "
+            f"({len(points)} points) -> {out_stem}\n"
+            f"Spearman(D, accuracy)  [identical for sqrt(D); negative = lower D "
+            f"goes with higher accuracy]\n"
+            f"  within seed : {stats['within_mean']:+.3f} ± {stats['within_std']:.3f} "
+            f"(over {stats['n_seeds']} seeds)\n"
+            f"  pooled, seed-centred : {stats['pooled_centred']:+.3f} "
+            f"({stats['n_points']} points)")
+        trajectory = trajectory_label(panel_rows)
+        if trajectory:
+            logger.info(f"Scoring trajectory: {trajectory}")
+        logger.info("Series in the figure (label | colour | marker):\n" + "\n".join(
+            f"  {label:<40s} {color}  {marker}" for label, color, marker in entries))
     return results
 
 
@@ -334,9 +405,18 @@ def main(argv=None):
                    help='Fallback for tables written without a dataset column.')
     p.add_argument('--architecture', default=None,
                    help='Fallback for tables written without an architecture column.')
-    p.add_argument('--annotate_seed', action='store_true', default=False,
-                   help='Label every marker with its seed, which makes the '
-                        'per-seed clustering visible.')
+    p.add_argument('--legend', action='store_true', default=False,
+                   help='Draw a legend below the figure (off by default).')
+    p.add_argument('--width', choices=list(WIDTHS_IN), default='double',
+                   help='Figure width: single (3.4in), onehalf (5.2in), double (7.2in).')
+    p.add_argument('--formats', nargs='+', default=['pdf'],
+                   help='Output formats, e.g. pdf png. Default: pdf (vector).')
+    p.add_argument('--no_title', action='store_true', default=False,
+                   help='Omit the figure title (use the caption instead).')
+    p.add_argument('--kl_label', default='KL',
+                   help='Legend name for the KL-based selection method.')
+    p.add_argument('--xscale', choices=['log', 'linear'], default='log',
+                   help='x axis scale.')
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -349,7 +429,9 @@ def main(argv=None):
     paths = expand_inputs(args.input)
     logger.info(f"Reading {len(paths)} per-subset table(s).")
     rows = read_rows(paths, args.dataset, args.architecture)
-    results = plot_all(rows, out_dir, annotate_seed=args.annotate_seed, logger=logger)
+    results = plot_all(rows, out_dir, logger, legend=args.legend, width=args.width,
+                       formats=tuple(args.formats), title=not args.no_title,
+                       kl_label=args.kl_label, xscale=args.xscale)
     if not results:
         logger.error("No figure drawn: no row had both a D value and an accuracy. "
                      "Runs made with --selection_only have no accuracy to pair.")

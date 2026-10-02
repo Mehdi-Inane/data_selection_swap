@@ -68,11 +68,11 @@ srun python "${PROJECT_ROOT}/scripts/analyze/score_subsets.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
     --data_dir "$LOCAL_DATA" \
-    --checkpoint_dir "${CHECKPOINT_DIR}/seed_{seed}" \
+    --checkpoint_dir "${CHECKPOINT_DIR}/" \
     --scratch "$SCRATCH_BASE" \
     --fractions "$FRACTION" \
     --seeds "${SEEDS[@]}" \
-    --num_checkpoints "${NUM_CHECKPOINTS:-10}" \
+    --num_checkpoints "${NUM_CHECKPOINTS:-0}" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
     --weighting "${WEIGHTING:-sgd}" \
