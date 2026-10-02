@@ -18,10 +18,17 @@ filename. Discovery is shared with ``analysis.comparison``, so a method
 that has not been run is simply absent, and two configs in one seed
 directory are refused rather than averaged.
 
-The n-by-n kernel P is not materialised. Mean gradients ``gbar_k`` are
-cached per checkpoint, and the resulting per-subset D values are written
-to ``d_exact_<dataset>_<architecture>.csv``. A later run reads that file
-and redraws the D figure without another backward pass.
+The n-by-n kernel P is not materialised on this path. Mean gradients
+``gbar_k`` are cached per checkpoint, and the resulting per-subset D
+values are written to ``d_exact_<dataset>_<architecture>.csv``. A later
+run reads that file and redraws the D figure without another backward
+pass.
+
+To score every saved subset from a stored kernel instead, precompute
+``P`` and ``r`` with ``scripts/analyze/precompute_kernel.py`` (Slurm:
+``scripts/slurm/run_precompute_kernel.sh``), then run
+``scripts/analyze/score_kernel.py``. ``q`` depends on the budget:
+``q(m) = -2 r / m``.
 
 Usage:
     python scripts/plot/result_plots.py --dataset cifar10 --architecture resnet18
@@ -371,9 +378,10 @@ def plot_vs_budget(series, title, xlabel, ylabel, out_path):
     _plot(title, xlabel, ylabel, out_path, draw)
 
 
-def plot_error_vs_d(series, title, out_path):
+def plot_error_vs_d(series, title, out_path,
+                    xlabel='Exact full-network D (all checkpoints)'):
     if not series:
-        print(f"Skipping {os.path.basename(out_path)}: no exact D values yet. "
+        print(f"Skipping {os.path.basename(out_path)}: no D values yet. "
               f"Pass --data_dir to score all checkpoints, or reuse the D cache.")
         return
 
@@ -386,8 +394,7 @@ def plot_error_vs_d(series, title, out_path):
             ax.errorbar(xs, ys, xerr=xerr, yerr=yerr, marker='o', capsize=3,
                         label=item['label'])
 
-    _plot(title, 'Exact full-network D (all checkpoints)', 'Mean test error (%)',
-          out_path, draw)
+    _plot(title, xlabel, 'Mean test error (%)', out_path, draw)
 
 
 def score_missing(rows, args, scoring, cache_path, logger):

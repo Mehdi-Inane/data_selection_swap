@@ -292,6 +292,13 @@ class CountSketchTest(unittest.TestCase):
         right = torch.dot(x, sketch.adjoint(y))
         torch.testing.assert_close(left, right)
 
+    def test_apply_batch_matches_apply(self):
+        sketch = kl_full.CountSketch(30, 6, seed=3)
+        flats = torch.randn(5, 30)
+        batched = sketch.apply_batch(flats)
+        for row in range(flats.shape[0]):
+            torch.testing.assert_close(batched[row], sketch.apply(flats[row]))
+
 
 class _Ckpt:
     def __init__(self, path, weight):

@@ -164,6 +164,16 @@ class CountSketch:
         out = torch.zeros(self.proj_dim, dtype=flat.dtype, device=flat.device)
         return out.scatter_add_(0, self.buckets.to(flat.device), signed)
 
+    def apply_batch(self, flats):
+        """R applied to each row. ``flats`` is ``[B, d]`` and the result is ``[B, p]``."""
+        if flats.dim() != 2 or flats.shape[1] != self.dim:
+            raise ValueError(f"expected [B, {self.dim}], got {tuple(flats.shape)}")
+        signs = self.signs.to(device=flats.device, dtype=flats.dtype)
+        buckets = self.buckets.to(flats.device).expand(flats.shape[0], -1)
+        signed = flats * signs
+        out = flats.new_zeros(flats.shape[0], self.proj_dim)
+        return out.scatter_add_(1, buckets, signed)
+
     def adjoint(self, sketched):
         """R^T @ sketched, a vector of length d."""
         if sketched.numel() != self.proj_dim:
