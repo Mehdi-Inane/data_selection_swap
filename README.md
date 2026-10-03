@@ -318,7 +318,34 @@ python scripts/analyze/score_subsets.py \
 python scripts/plot/checkpoint_ablation.py \
   --dataset cifar100 \
   --scratch /path/to/scratch
+
+# Do the architectures (and the baselines) pick the same examples?
+python scripts/analyze/selection_overlap.py \
+  --dataset cifar10 \
+  --scratch /path/to/scratch
+
+# What does picking different examples cost? (needs a GPU)
+python scripts/analyze/transfer_d.py \
+  --dataset cifar10 \
+  --data_dir /path/to/cifar10 \
+  --scratch /path/to/scratch
 ```
+
+`selection_overlap.py` reports chance-corrected agreement `kappa` between every
+pair of saved subsets, across architectures, across methods, and across seeds.
+The cross-seed figure is the one to read the others against: it is how
+reproducible selection is at all, so a cross-architecture `kappa` far below it
+means the architecture, not run noise, decides what gets picked. Pass
+`--data_dir` to split agreement into class composition and individual examples,
+and `--scored_input` to rank the baselines against every `kl_faithful*` variant
+on set agreement, `D_rel`, and accuracy at once. Unlike the aggregators it
+discovers runs through their `*_indices.pt`, so `--selection_only` runs count.
+
+`transfer_d.py` then scores each architecture's subset against every
+architecture's trajectory, so the diagonal is the matched case and an
+off-diagonal entry is what the other architecture would have got by importing
+that subset. Its diagonal recomputes what `score_subsets.py` already wrote,
+which makes it a consistency check on the scoring setup.
 
 The aggregator discovers optimizer variants separately (for example,
 `kl_faithful`, `kl_faithful_sgd`, and `kl_faithful_adam`), so their accuracy
@@ -354,6 +381,7 @@ sbatch scripts/slurm/run_kl_selection.sh
 sbatch scripts/slurm/run_kl_full_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
+sbatch scripts/slurm/run_transfer_d.sh   # one array task per target architecture
 
 # Controlled multi-stage suites (submitters add strict afterok dependencies)
 scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json
