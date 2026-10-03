@@ -108,6 +108,73 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             self.assertIn(r"\textbf{75.00}", kl_tex)
             self.assertIn("KL selectors only", kl_tex)
 
+    def test_accuracy_curves_follow_the_baseline_comparison_rules(self):
+        rows = [
+            dict(method="kl_faithful", k=1, fraction=0.1, error=20.0, seed=42),
+            dict(method="kl_faithful", k=1, fraction=0.1, error=10.0, seed=43),
+            dict(method="kl_faithful", k=10, fraction=0.1, error=40.0, seed=42),
+            dict(method="kl_faithful", k=10, fraction=0.2, error=30.0, seed=42),
+            dict(method="random", k=None, fraction=0.1, error=25.0, seed=42),
+            dict(method="el2n", k=None, fraction=0.1, error=50.0, seed=42),
+            dict(method="el2n", k=None, fraction=0.2, error=15.0, seed=42),
+        ]
+        compared = result_plots.comparison_accuracy_series(
+            result_plots.baseline_comparison_rows(result_plots.with_accuracy(rows)))
+        labels = [item["label"] for item in compared]
+        self.assertEqual(labels, [
+            result_plots.KL_DISPLAY_NAME, "random", "el2n"])
+        ours = compared[0]["points"]
+        self.assertEqual(len(ours), 1)
+        self.assertEqual(ours[0][0], 0.1)
+        self.assertAlmostEqual(ours[0][1], 85.0)
+        self.assertAlmostEqual(ours[0][2], 7.0710678118654755)
+        self.assertEqual(ours[0][3], 2)
+        el2n = compared[-1]["points"]
+        self.assertEqual([point[0] for point in el2n], [0.2])
+        self.assertAlmostEqual(el2n[0][1], 85.0)
+
+        k_series = result_plots.k_accuracy_series(result_plots.with_accuracy(rows))
+        self.assertEqual([item["label"] for item in k_series], ["K=1", "K=10"])
+        self.assertEqual([point[0] for point in k_series[1]["points"]], [0.1, 0.2])
+        self.assertTrue(result_plots.emphasizes_k1("K=1"))
+        self.assertTrue(result_plots.emphasizes_k1("kl_faithful, K=1"))
+        self.assertFalse(result_plots.emphasizes_k1("K=10"))
+
+    def test_checkpoint_ablation_csv_matches_the_baseline_table(self):
+        from data_selection_swap.analysis import checkpoint_ablation
+
+        budget = 4500
+        with tempfile.TemporaryDirectory() as scratch:
+            for k, acc in ((1, 80.0), (10, 70.0)):
+                directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
+                             / str(budget) / "seed_42")
+                directory.mkdir(parents=True, exist_ok=True)
+                name = f"kl_faithful_{budget}_K{k}"
+                (directory / f"{name}_metrics.json").write_text(
+                    json.dumps({"50": acc, "100": acc}), encoding="utf-8")
+                (directory / f"{name}_timing.json").write_text(
+                    json.dumps({"selection_seconds": 3.0}), encoding="utf-8")
+
+            rows = checkpoint_ablation.collect_ablation_rows(
+                scratch, "cifar10", "resnet18", [0.1], [42], [1, 10])
+            self.assertEqual(sorted(row["k"] for row in rows), [1, 10])
+            series = result_plots.k_accuracy_series(result_plots.with_accuracy(rows))
+            by_k = {item["label"]: item["points"][0][1] for item in series}
+            self.assertAlmostEqual(by_k["K=1"], 80.0)
+            self.assertAlmostEqual(by_k["K=10"], 70.0)
+
+            out = Path(scratch) / "d_exact_cifar10_resnet18.csv"
+            result_plots.write_table(
+                str(out), rows, "checkpoint_ablation|cifar10|resnet18",
+                "cifar10", "resnet18")
+            header = out.read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(header, ",".join(result_plots.CACHE_FIELDS))
+
+            pdf = Path(scratch) / "resnet18_cifar10.pdf"
+            result_plots.plot_accuracy_vs_fraction(series, str(pdf),
+                                                   emphasize=result_plots.emphasizes_k1)
+            self.assertGreater(pdf.stat().st_size, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
