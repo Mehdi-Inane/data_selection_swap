@@ -5,7 +5,7 @@
 #SBATCH --array=0-5
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --mem=48Gb
 
 # One task per (dataset, architecture): 2 x 3 = 6 (array 0-5).
