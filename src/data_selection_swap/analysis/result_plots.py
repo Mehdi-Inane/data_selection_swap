@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Plot baseline and KL-Faithful results, one figure per dataset and architecture.
 
-Three figures, mean ± std over seeds:
+Figures, mean ± std over seeds:
 
-  * test error vs budget
-        error for one run is the mean of ``100 - accuracy`` over the epochs
-        stored in ``*_metrics.json`` (logged every 50 epochs, plus the last)
+  * test accuracy vs fraction of the training set
+        accuracy is ``100 - error``. ``error`` is the mean of ``100 - accuracy``
+        over the epochs stored in ``*_metrics.json`` (logged every 50 epochs,
+        plus the last). The baseline comparison keeps KL at K=1; the KL figure
+        draws one curve per saved K.
   * test error vs exact full-network D
         every method is scored on the same trajectory: all checkpoints,
         Euclidean gradients, ``D = sum_k w_k ||u_I^k / m - gbar_k||^2``
@@ -178,6 +180,109 @@ def latex_path_for(csv_path, suffix=''):
 
 def is_kl_method(method):
     return str(method).startswith('kl_faithful')
+
+
+KL_DISPLAY_NAME = "Gradient Swap, 1 epoch (ours)"
+TOL_BRIGHT = ['#4477AA', '#EE6677', '#228833', '#AA3377', '#66CCEE', '#CCBB44', '#000000']
+LINESTYLES = ['-', '--', '-.', ':', '-', '--', '-.']
+MARKERS = ["*", "o", "s", "^", "v", "D", "<", ">"]
+ACCURACY_RC = {
+    "font.size": 16,
+    "axes.labelsize": 22,
+    "xtick.labelsize": 18,
+    "ytick.labelsize": 18,
+    "legend.fontsize": 15,
+}
+
+
+def with_accuracy(rows):
+    """Copy rows that have a finite error and set ``accuracy = 100 - error``."""
+    converted = []
+    for row in rows:
+        if not _finite(row.get('error')):
+            continue
+        copied = dict(row)
+        copied['accuracy'] = 100.0 - float(row['error'])
+        converted.append(copied)
+    return converted
+
+
+def baseline_comparison_rows(rows, kl_name=KL_DISPLAY_NAME):
+    """Rows for the baseline figure: KL restricted to K=1, EL2N's smallest fraction dropped."""
+    kept = []
+    for row in rows:
+        copied = dict(row)
+        if is_kl_method(copied['method']):
+            if copied.get('k') != 1:
+                continue
+            copied['method'] = kl_name
+        kept.append(copied)
+    el2n_fractions = [row['fraction'] for row in kept if row['method'] == 'el2n']
+    if el2n_fractions:
+        first = min(el2n_fractions)
+        kept = [row for row in kept
+                if not (row['method'] == 'el2n' and row['fraction'] == first)]
+    return kept
+
+
+def _aggregate_accuracy(rows, label_of):
+    """``(fraction, mean, std, n)`` points per label. ``std`` matches pandas (ddof=1)."""
+    buckets = {}
+    for row in rows:
+        if not _finite(row.get('accuracy')):
+            continue
+        key = (label_of(row), row['fraction'])
+        buckets.setdefault(key, []).append(float(row['accuracy']))
+    series = {}
+    for (label, fraction), values in buckets.items():
+        mean, std = mean_std(values)
+        if not np.isfinite(std):
+            std = 0.0
+        series.setdefault(label, []).append((fraction, mean, std, len(values)))
+    return series
+
+
+def comparison_accuracy_series(rows):
+    """Seed-averaged accuracy vs fraction. ``rows`` are already the baseline-comparison subset."""
+    series = _aggregate_accuracy(rows, lambda row: row['method'])
+    others = sorted(label for label in series if label not in (KL_DISPLAY_NAME, 'el2n'))
+    if 'el2n' in series:
+        others.append('el2n')
+    order = ([KL_DISPLAY_NAME] if KL_DISPLAY_NAME in series else []) + others
+    for label in series:
+        if label not in order:
+            order.append(label)
+    return [dict(label=label, points=sorted(series[label], key=lambda point: point[0]))
+            for label in order]
+
+
+def k_accuracy_series(rows):
+    """Seed-averaged accuracy vs fraction, one curve per saved checkpoint count."""
+    tagged = [row for row in rows if row.get('k') is not None]
+    methods = {row['method'] for row in tagged}
+
+    def label_of(row):
+        k = int(row['k'])
+        if len(methods) <= 1:
+            return f"K={k}"
+        return f"{row['method']}, K={k}"
+
+    series = _aggregate_accuracy(tagged, label_of)
+
+    def sort_key(label):
+        k_text = label.split('K=')[-1]
+        try:
+            k = int(k_text)
+        except ValueError:
+            k = 0
+        return (k, label)
+
+    return [dict(label=label, points=sorted(series[label], key=lambda point: point[0]))
+            for label in sorted(series, key=sort_key)]
+
+
+def emphasizes_k1(label):
+    return label == 'K=1' or str(label).endswith(', K=1')
 
 
 def _latex_escape(text):
@@ -363,6 +468,73 @@ def _plot(title, xlabel, ylabel, out_path, draw):
     print(f"Saved -> {out_path}")
 
 
+def _curve_style(index):
+    return dict(color=TOL_BRIGHT[index % 7],
+                ls=LINESTYLES[(index + index // 7) % 7],
+                marker=MARKERS[index % len(MARKERS)])
+
+
+def plot_accuracy_vs_fraction(series, out_path, emphasize=None, exclude_from_limits=()):
+    """Accuracy vs fraction with the baseline-comparison styling.
+
+    ``emphasize`` is a label, or a callable of the label, drawn thicker.
+    Series named in ``exclude_from_limits`` stay on the figure but do not
+    set the y-limits, which is how EL2N is allowed to run off the bottom.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    if not series:
+        print(f"Skipping {os.path.basename(out_path)}: nothing to plot.")
+        return
+
+    def is_emphasized(label):
+        if emphasize is None:
+            return False
+        if callable(emphasize):
+            return bool(emphasize(label))
+        return label == emphasize
+
+    with plt.rc_context(ACCURACY_RC):
+        fig, ax = plt.subplots(figsize=(9, 6.5))
+        for index, item in enumerate(series):
+            xs = [point[0] for point in item['points']]
+            ys = [point[1] for point in item['points']]
+            stds = [point[2] for point in item['points']]
+            style = _curve_style(index)
+            highlighted = is_emphasized(item['label'])
+            ax.plot(xs, ys, color=style['color'], linestyle=style['ls'],
+                    marker=style['marker'], lw=3.0 if highlighted else 2.2,
+                    ms=16 if highlighted else 9, label=item['label'],
+                    markeredgecolor=style['color'], zorder=10 if highlighted else 3)
+            ax.fill_between(xs, [y - s for y, s in zip(ys, stds)],
+                            [y + s for y, s in zip(ys, stds)],
+                            color=style['color'], alpha=0.15, lw=0, zorder=2)
+
+        reference = [point for item in series if item['label'] not in exclude_from_limits
+                     for point in item['points']]
+        if not reference:
+            reference = [point for item in series for point in item['points']]
+        lo = min(point[1] - point[2] for point in reference)
+        hi = max(point[1] + point[2] for point in reference)
+        pad = 0.06 * (hi - lo) if hi > lo else 1.0
+        ax.set_ylim(lo - pad, hi + pad)
+
+        fracs = sorted({point[0] for item in series for point in item['points']})
+        ax.set_xticks(fracs)
+        ax.set_xlim(min(fracs) - 0.04, max(fracs) + 0.04)
+        ax.set_xlabel("Fraction of the training set")
+        ax.set_ylabel("Test accuracy")
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="lower right", frameon=True, framealpha=0.95)
+        fig.tight_layout()
+        os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+    print(f"Saved -> {out_path}")
+
+
 def plot_vs_budget(series, title, xlabel, ylabel, out_path):
     if not series:
         print(f"Skipping {os.path.basename(out_path)}: nothing to plot.")
@@ -475,8 +647,8 @@ def score_missing(rows, args, scoring, cache_path, logger):
         logger.info(f"Wrote D cache -> {cache_path}")
 
 
-def _figure_path(out_dir, dataset, architecture, name):
-    return os.path.join(out_dir, f"{dataset}_{architecture}_{name}.png")
+def _figure_path(out_dir, dataset, architecture, name, ext='png'):
+    return os.path.join(out_dir, f"{dataset}_{architecture}_{name}.{ext}")
 
 
 def main(argv=None):
@@ -567,19 +739,20 @@ def main(argv=None):
         kl_tex = latex_path_for(cache_path, '_kl')
         write_latex(kl_tex, kl_rows, args.dataset, args.architecture, kl_only=True)
         logger.info(f"KL-only LaTeX table -> {kl_tex}")
-        plot_vs_budget(
-            group_by_budget(kl_rows, 'error'),
-            f"{prefix}: KL test error vs budget",
-            'Budget (selected points)', 'Mean test error (%)',
-            _figure_path(out_dir, args.dataset, args.architecture, 'kl_error_vs_budget'))
+        plot_accuracy_vs_fraction(
+            k_accuracy_series(with_accuracy(kl_rows)),
+            _figure_path(out_dir, args.dataset, args.architecture,
+                         'kl_accuracy_vs_fraction', ext='pdf'),
+            emphasize=emphasizes_k1)
     else:
         logger.info("No KL runs found; skipping the KL-only plot and table.")
 
-    plot_vs_budget(
-        group_by_budget(rows, 'error'),
-        f"{prefix}: test error vs budget",
-        'Budget (selected points)', 'Mean test error (%)',
-        _figure_path(out_dir, args.dataset, args.architecture, 'error_vs_budget'))
+    plot_accuracy_vs_fraction(
+        comparison_accuracy_series(baseline_comparison_rows(with_accuracy(rows))),
+        _figure_path(out_dir, args.dataset, args.architecture,
+                     'accuracy_vs_fraction', ext='pdf'),
+        emphasize=KL_DISPLAY_NAME,
+        exclude_from_limits=('el2n',))
     plot_error_vs_d(
         group_error_vs_d(rows),
         f"{prefix}: test error vs exact D",

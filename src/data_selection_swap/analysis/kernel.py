@@ -39,16 +39,23 @@ import torch.nn.functional as F
 
 from .comparison import N_TRAIN
 from .result_plots import (
+    KL_DISPLAY_NAME,
     attach_cached_d,
+    baseline_comparison_rows,
     collect_runs,
+    comparison_accuracy_series,
+    emphasizes_k1,
     group_by_budget,
     group_error_vs_d,
     is_kl_method,
+    k_accuracy_series,
     latex_path_for,
     locate_checkpoint_dir,
+    plot_accuracy_vs_fraction,
     plot_error_vs_d,
     plot_vs_budget,
     scoring_id,
+    with_accuracy,
     write_latex,
     write_table,
 )
@@ -473,17 +480,16 @@ def score_main(argv=None):
         kl_tex = latex_path_for(cache_path, '_kl')
         write_latex(kl_tex, kl_rows, args.dataset, args.architecture, kl_only=True)
         logger.info(f"KL-only LaTeX table -> {kl_tex}")
-        plot_vs_budget(
-            group_by_budget(kl_rows, 'error'),
-            f"{prefix}: KL test error vs budget",
-            'Budget (selected points)', 'Mean test error (%)',
-            os.path.join(out_dir, f"{args.dataset}_{args.architecture}_kl_error_vs_budget.png"))
+        plot_accuracy_vs_fraction(
+            k_accuracy_series(with_accuracy(kl_rows)),
+            os.path.join(out_dir, f"{args.dataset}_{args.architecture}_kl_accuracy_vs_fraction.pdf"),
+            emphasize=emphasizes_k1)
 
-    plot_vs_budget(
-        group_by_budget(rows, 'error'),
-        f"{prefix}: test error vs budget",
-        'Budget (selected points)', 'Mean test error (%)',
-        os.path.join(out_dir, f"{args.dataset}_{args.architecture}_error_vs_budget.png"))
+    plot_accuracy_vs_fraction(
+        comparison_accuracy_series(baseline_comparison_rows(with_accuracy(rows))),
+        os.path.join(out_dir, f"{args.dataset}_{args.architecture}_accuracy_vs_fraction.pdf"),
+        emphasize=KL_DISPLAY_NAME,
+        exclude_from_limits=('el2n',))
     plot_error_vs_d(
         group_error_vs_d(rows),
         f"{prefix}: test error vs sketched D",
