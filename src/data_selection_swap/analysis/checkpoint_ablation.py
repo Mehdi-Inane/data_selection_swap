@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Checkpoint-count ablation: test accuracy against the selection budget.
 
-Reads the runs produced by checkpoint_ablation.sh (``selection.kl`` with
-``--num_checkpoints`` in {1, 3, 5, 10, 20}, every fraction and seed) and
-draws one curve per K. Accuracy is ``100 - error``, with ``error`` the same
-epoch-averaged test error stored in the baseline comparison tables.
+Reads full-network KL runs (``kl_faithful_full_<architecture>_sgd``) and
+draws one accuracy curve per K. Also writes a booktabs table with one row
+per architecture and checkpoint count, and one accuracy column per fraction.
 
 The CSV uses that table's columns (``d_exact_<dataset>_<architecture>.csv``),
 so the same reader can load an ablation and a baseline comparison.
@@ -12,19 +11,36 @@ so the same reader can load an ablation and a baseline comparison.
 Usage:
     python scripts/plot/checkpoint_ablation.py --dataset cifar100
     python scripts/plot/checkpoint_ablation.py --dataset cifar100 \
-        --checkpoints 1 3 5 10 20 --fractions 0.1 0.2 0.4 0.5
+        --checkpoints 1 4 10 15 20 --fractions 0.1 0.2 0.4 0.5
 """
 
 import argparse
 import os
 
-from .comparison import N_TRAIN
+from .comparison import N_TRAIN, mean_std
 from .result_plots import (
     emphasizes_k1, k_accuracy_series, plot_accuracy_vs_fraction, with_accuracy,
     collect_runs, write_table,
 )
 
 METHOD = 'kl_faithful'
+ARCHITECTURES = ('resnet18', 'vgg16', 'inception')
+ARCHITECTURE_NAMES = {
+    'resnet18': 'ResNet-18',
+    'vgg16': 'VGG-16',
+    'inception': 'Inception',
+}
+
+
+def full_method(architecture):
+    """Filename prefix written by ``selection.kl_full`` with the SGD objective."""
+    return f"kl_faithful_full_{architecture}_sgd"
+
+
+def methods_for(architecture, methods):
+    if methods:
+        return list(methods)
+    return [full_method(architecture)]
 
 
 def collect_ablation_rows(scratch, dataset, architecture, fractions, seeds,
@@ -34,6 +50,53 @@ def collect_ablation_rows(scratch, dataset, architecture, fractions, seeds,
     wanted = set(int(k) for k in checkpoints)
     rows = collect_runs(scratch, dataset, architecture, fractions, seeds, methods)
     return [row for row in rows if row.get('k') in wanted]
+
+
+def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
+                  checkpoints, methods=None):
+    """Booktabs table: architecture, K, and test accuracy at each fraction.
+
+    Each accuracy cell is the mean ± std over seeds. ``methods`` overrides the
+    per-architecture ``kl_faithful_full_<architecture>_sgd`` prefix.
+    """
+    buckets = {}
+    for architecture in architectures:
+        rows = with_accuracy(collect_ablation_rows(
+            scratch, dataset, architecture, fractions, seeds, checkpoints,
+            methods=methods_for(architecture, methods)))
+        for row in rows:
+            key = (architecture, int(row['k']), row['fraction'])
+            buckets.setdefault(key, []).append(float(row['accuracy']))
+
+    frac_headers = ' & '.join(f'{100 * fraction:g}\\%' for fraction in fractions)
+    lines = [
+        r'\begin{table}',
+        r'\centering',
+        r'\caption{Test accuracy (\%) of full-network Gradient Swap on '
+        + dataset + r', mean $\pm$ std over seeds.}',
+        r'\begin{tabular}{ll' + 'c' * len(fractions) + '}',
+        r'\toprule',
+        r'Architecture & $K$ & ' + frac_headers + r' \\',
+        r'\midrule',
+    ]
+    for architecture in architectures:
+        for k in checkpoints:
+            cells = [ARCHITECTURE_NAMES.get(architecture, architecture), str(int(k))]
+            for fraction in fractions:
+                values = buckets.get((architecture, int(k), fraction), [])
+                if not values:
+                    cells.append('--')
+                    continue
+                mean, std = mean_std(values)
+                cells.append(f'{mean:.2f} $\\pm$ {std:.2f}')
+            lines.append(' & '.join(cells) + r' \\')
+        lines.append(r'\midrule')
+    if lines[-1] == r'\midrule':
+        lines.pop()
+    lines.extend([r'\bottomrule', r'\end{tabular}', r'\end{table}', ''])
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('\n'.join(lines))
 
 
 def print_accuracy(series):
@@ -50,28 +113,40 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dataset', default='cifar100', choices=list(N_TRAIN))
     p.add_argument('--architecture', default='resnet18',
-                   choices=['resnet18', 'vgg16', 'inception'])
+                   choices=list(ARCHITECTURES),
+                   help='Architecture drawn in the accuracy figure.')
+    p.add_argument('--architectures', default=list(ARCHITECTURES), nargs='+',
+                   choices=list(ARCHITECTURES),
+                   help='Architectures included in the LaTeX table.')
     p.add_argument('--fractions', default=[0.1, 0.2, 0.4, 0.5], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
-    p.add_argument('--checkpoints', default=[1, 3, 5, 10, 20], type=int, nargs='+',
-                   help='--num_checkpoints values swept by checkpoint_ablation.sh')
+    p.add_argument('--checkpoints', default=[1, 4, 10, 15, 20], type=int, nargs='+',
+                   help='--num_checkpoints values in the saved sweep.')
     p.add_argument('--methods', default=None, nargs='+',
-                   help='Default: kl_faithful.')
+                   help='Filename prefix before _<budget>_K. '
+                        'Default: kl_faithful_full_<architecture>_sgd.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
     p.add_argument('--out_dir', default=None,
                    help='Default: $SCRATCH/data_selection_baselines/checkpoint_ablation')
     args = p.parse_args(argv)
 
+    out_dir = args.out_dir or os.path.join(
+        args.scratch, 'data_selection_baselines', 'checkpoint_ablation')
+    tex_path = os.path.join(out_dir, f'{args.dataset}_k_accuracy.tex')
+    write_k_latex(
+        tex_path, args.scratch, args.dataset, args.architectures, args.fractions,
+        args.seeds, args.checkpoints, args.methods)
+    print(f"Saved → {tex_path}")
+
     rows = collect_ablation_rows(
         args.scratch, args.dataset, args.architecture, args.fractions,
-        args.seeds, args.checkpoints, args.methods)
+        args.seeds, args.checkpoints,
+        methods_for(args.architecture, args.methods))
     if not rows:
         print(f"No checkpoint-ablation runs found under {args.scratch} for "
               f"{args.dataset}/{args.architecture}.")
         return
 
-    out_dir = args.out_dir or os.path.join(
-        args.scratch, 'data_selection_baselines', 'checkpoint_ablation')
     csv_path = os.path.join(
         out_dir, f"d_exact_{args.dataset}_{args.architecture}.csv")
     scoring = f"checkpoint_ablation|{args.dataset}|{args.architecture}"

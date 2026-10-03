@@ -175,6 +175,29 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
                                                    emphasize=result_plots.emphasizes_k1)
             self.assertGreater(pdf.stat().st_size, 0)
 
+    def test_k_latex_table_reports_accuracy_by_architecture_and_k(self):
+        from data_selection_swap.analysis import checkpoint_ablation
+
+        budget = 4500
+        with tempfile.TemporaryDirectory() as scratch:
+            for seed, acc in ((42, 80.0), (43, 90.0)):
+                directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
+                             / str(budget) / f"seed_{seed}")
+                directory.mkdir(parents=True)
+                name = f"kl_faithful_full_resnet18_sgd_{budget}_K1"
+                (directory / f"{name}_metrics.json").write_text(
+                    json.dumps({"50": acc, "100": acc}), encoding="utf-8")
+            path = Path(scratch) / "cifar10_k_accuracy.tex"
+            checkpoint_ablation.write_k_latex(
+                str(path), scratch, "cifar10", ["resnet18", "vgg16"],
+                [0.1], [42, 43], [1, 4])
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(r"Architecture & $K$ & 10\% \\", text)
+            self.assertIn(r"ResNet-18 & 1 & 85.00 $\pm$ 7.07 \\", text)
+            self.assertIn(r"ResNet-18 & 4 & -- \\", text)
+            self.assertIn(r"VGG-16 & 1 & -- \\", text)
+            self.assertIn(r"\end{table}", text)
+
 
 if __name__ == "__main__":
     unittest.main()
