@@ -335,11 +335,12 @@ RC = {
     'font.family': 'serif',
     'font.serif': ['STIXGeneral', 'DejaVu Serif'],
     'mathtext.fontset': 'stix',
-    'font.size': 8,
-    'axes.labelsize': 9,
-    'axes.titlesize': 9,
-    'xtick.labelsize': 8,
-    'ytick.labelsize': 8,
+    'font.size': 14,
+    'axes.labelsize': 16,
+    'axes.titlesize': 16,
+    'legend.fontsize': 14,
+    'xtick.labelsize': 13,
+    'ytick.labelsize': 13,
     'axes.linewidth': 0.7,
     'pdf.fonttype': 42,   # embed TrueType fonts (journals reject Type 3)
     'ps.fonttype': 42,
@@ -428,8 +429,8 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
         w = WIDTHS_IN[width]
         fig, ax = plt.subplots(figsize=(w, 0.7 * w))
         ax.scatter(x, y, **scatter_kw)
-        ax.set_xlabel(X_LABEL, fontsize=10)
-        ax.set_ylabel(Y_LABEL, fontsize=8)
+        ax.set_xlabel(X_LABEL, fontsize=16)
+        ax.set_ylabel(Y_LABEL, fontsize=16)
         ax.grid(alpha=0.25, lw=0.4)
 
         if xscale == 'log' and np.all(x > 0):
@@ -454,7 +455,7 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
             ins.scatter(x, y, **scatter_kw)
             ins.set_xlim(x0, x1)
             ins.set_ylim(y0, y1)
-            ins.tick_params(labelsize=6.5, length=2.5)
+            ins.tick_params(labelsize=11, length=3)
             ins.grid(alpha=0.25, lw=0.4)
             for spine in ins.spines.values():
                 spine.set_linewidth(0.9)
@@ -463,7 +464,7 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
             ax.text(tx, ty,
                     f"Pearson $r$ = {stats['pearson']:+.2f}\n"
                     f"Spearman $\\rho$ = {stats['spearman']:+.2f}",
-                    transform=ax.transAxes, ha=tha, va=tva, fontsize=7.5, zorder=6,
+                    transform=ax.transAxes, ha=tha, va=tva, fontsize=13, zorder=6,
                     bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='0.6',
                               lw=0.5, alpha=0.9))
 
@@ -471,7 +472,7 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
             budget = points[0]['budget']
             budget_text = f", budget {int(budget)}" if budget else ''
             ax.set_title(f"{dataset} / {architecture}, fraction {fraction:g}"
-                         f"{budget_text}", fontsize=9)
+                         f"{budget_text}", fontsize=16)
 
         fig.tight_layout()
         os.makedirs(os.path.dirname(out_stem) or '.', exist_ok=True)
