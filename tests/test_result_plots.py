@@ -192,10 +192,11 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
                 str(path), scratch, "cifar10", ["resnet18", "vgg16"],
                 [0.1], [42, 43], [1, 4])
             text = path.read_text(encoding="utf-8")
-            self.assertIn(r"Architecture & $K$ & 10\% \\", text)
-            self.assertIn(r"ResNet-18 & 1 & 85.00 $\pm$ 7.07 \\", text)
-            self.assertIn(r"ResNet-18 & 4 & -- \\", text)
-            self.assertIn(r"VGG-16 & 1 & -- \\", text)
+            self.assertIn(r"\multicolumn{2}{c}{10\%}", text)
+            self.assertIn(r"Mean $\pm$ std & Var.", text)
+            self.assertIn(r"ResNet-18 & 1 & 85.00 $\pm$ 7.07 & 50.00 \\", text)
+            self.assertIn(r"ResNet-18 & 4 & -- & -- \\", text)
+            self.assertIn(r"VGG-16 & 1 & -- & -- \\", text)
             self.assertIn(r"\end{table}", text)
 
 

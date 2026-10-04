@@ -3,7 +3,8 @@
 
 Reads full-network KL runs (``kl_faithful_full_<architecture>_sgd``) and
 draws one accuracy curve per K. Also writes a booktabs table with one row
-per architecture and checkpoint count, and one accuracy column per fraction.
+per architecture and checkpoint count. Each fraction has a mean-and-std
+column and a variance column.
 
 The CSV uses that table's columns (``d_exact_<dataset>_<architecture>.csv``),
 so the same reader can load an ablation and a baseline comparison.
@@ -56,8 +57,9 @@ def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
                   checkpoints, methods=None):
     """Booktabs table: architecture, K, and test accuracy at each fraction.
 
-    Each accuracy cell is the mean ± std over seeds. ``methods`` overrides the
-    per-architecture ``kl_faithful_full_<architecture>_sgd`` prefix.
+    Each fraction has two cells: mean ± std, and the sample variance over
+    seeds (the square of that std). ``methods`` overrides the per-architecture
+    ``kl_faithful_full_<architecture>_sgd`` prefix.
     """
     buckets = {}
     for architecture in architectures:
@@ -68,15 +70,21 @@ def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
             key = (architecture, int(row['k']), row['fraction'])
             buckets.setdefault(key, []).append(float(row['accuracy']))
 
-    frac_headers = ' & '.join(f'{100 * fraction:g}\\%' for fraction in fractions)
+    frac_headers = ' & '.join(
+        rf'\multicolumn{{2}}{{c}}{{{100 * fraction:g}\%}}' for fraction in fractions)
+    stat_headers = ' & '.join(['Mean $\\pm$ std & Var.'] * len(fractions))
+    rules = ' '.join(
+        rf'\cmidrule(lr){{{3 + 2 * i}-{4 + 2 * i}}}' for i in range(len(fractions)))
     lines = [
         r'\begin{table}',
         r'\centering',
         r'\caption{Test accuracy (\%) of full-network Gradient Swap on '
-        + dataset + r', mean $\pm$ std over seeds.}',
-        r'\begin{tabular}{ll' + 'c' * len(fractions) + '}',
+        + dataset + r'. Mean, standard deviation, and variance are over seeds.}',
+        r'\begin{tabular}{ll' + 'cc' * len(fractions) + '}',
         r'\toprule',
         r'Architecture & $K$ & ' + frac_headers + r' \\',
+        rules,
+        r' & & ' + stat_headers + r' \\',
         r'\midrule',
     ]
     for architecture in architectures:
@@ -85,10 +93,11 @@ def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
             for fraction in fractions:
                 values = buckets.get((architecture, int(k), fraction), [])
                 if not values:
-                    cells.append('--')
+                    cells.extend(['--', '--'])
                     continue
                 mean, std = mean_std(values)
                 cells.append(f'{mean:.2f} $\\pm$ {std:.2f}')
+                cells.append(f'{std * std:.2f}')
             lines.append(' & '.join(cells) + r' \\')
         lines.append(r'\midrule')
     if lines[-1] == r'\midrule':
