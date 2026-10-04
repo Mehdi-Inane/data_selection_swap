@@ -187,11 +187,12 @@ TOL_BRIGHT = ['#4477AA', '#EE6677', '#228833', '#AA3377', '#66CCEE', '#CCBB44', 
 LINESTYLES = ['-', '--', '-.', ':', '-', '--', '-.']
 MARKERS = ["*", "o", "s", "^", "v", "D", "<", ">"]
 ACCURACY_RC = {
-    "font.size": 16,
-    "axes.labelsize": 22,
-    "xtick.labelsize": 18,
-    "ytick.labelsize": 18,
-    "legend.fontsize": 15,
+    "font.size": 20,
+    "axes.labelsize": 26,
+    "axes.titlesize": 24,
+    "xtick.labelsize": 22,
+    "ytick.labelsize": 22,
+    "legend.fontsize": 20,
 }
 
 
@@ -454,17 +455,18 @@ def _plot(title, xlabel, ylabel, out_path, draw):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8.5, 5.2))
-    draw(ax)
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.grid(alpha=0.3)
-    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8)
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
+    with plt.rc_context(ACCURACY_RC):
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        draw(ax)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.3)
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=18)
+        fig.tight_layout()
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fig.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
     print(f"Saved -> {out_path}")
 
 
@@ -527,7 +529,7 @@ def plot_accuracy_vs_fraction(series, out_path, emphasize=None, exclude_from_lim
         ax.set_xlabel("Fraction of the training set")
         ax.set_ylabel("Test accuracy")
         ax.grid(True, linestyle="--", alpha=0.5)
-        ax.legend(loc="lower right", frameon=True, framealpha=0.95)
+        ax.legend(loc="lower right", frameon=True, framealpha=0.95, fontsize=20)
         fig.tight_layout()
         os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         fig.savefig(out_path, bbox_inches="tight")
