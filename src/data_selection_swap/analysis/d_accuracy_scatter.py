@@ -57,6 +57,7 @@ import sys
 import numpy as np
 from scipy.stats import rankdata, spearmanr
 
+from ..paths import tree
 from .comparison import RANDOM_METHOD
 
 
@@ -100,7 +101,8 @@ def as_percent(value):
     return value
 
 
-def full_metrics_candidates(scratch, dataset, architecture, seed=None, template=None):
+def full_metrics_candidates(scratch, dataset, architecture, seed=None, template=None,
+                            variant=''):
     """Locations of the full-pool trajectory's metrics.json, most specific last.
 
     The user-facing convention is
@@ -111,7 +113,8 @@ def full_metrics_candidates(scratch, dataset, architecture, seed=None, template=
         return [template.format(
             scratch=scratch, dataset=dataset, architecture=architecture,
             seed=seed if seed is not None else '')]
-    root = os.path.join(scratch, 'data_selection_swap', dataset, architecture, 'checkpoints')
+    root = os.path.join(
+        tree(scratch, 'data_selection_swap', variant), dataset, architecture, 'checkpoints')
     paths = [os.path.join(root, 'metrics.json')]
     if seed not in (None, ''):
         paths.append(os.path.join(root, f'seed_{seed}', 'metrics.json'))
@@ -139,15 +142,16 @@ def load_full_accuracy(path):
 
 
 def resolve_full_accuracy(scratch, dataset, architecture, seed=None, template=None,
-                          cache=None):
+                          cache=None, variant=''):
     """Return (accuracy_percent, path used). Prefer a per-seed file when both exist."""
     cache = {} if cache is None else cache
-    key = (dataset, architecture, str(seed), template)
+    key = (dataset, architecture, str(seed), template, variant)
     if key in cache:
         return cache[key]
     tried = []
     found = None
-    for path in full_metrics_candidates(scratch, dataset, architecture, seed, template):
+    for path in full_metrics_candidates(
+            scratch, dataset, architecture, seed, template, variant=variant):
         tried.append(path)
         if os.path.isfile(path):
             found = path
@@ -161,7 +165,7 @@ def resolve_full_accuracy(scratch, dataset, architecture, seed=None, template=No
     return result
 
 
-def attach_accuracy_gap(rows, scratch, template=None):
+def attach_accuracy_gap(rows, scratch, template=None, variant=''):
     """Set ``y = |acc_full - acc_subset|`` (a fraction, so b - a = 1) on every row."""
     cache = {}
     for row in rows:
@@ -171,7 +175,7 @@ def attach_accuracy_gap(rows, scratch, template=None):
             continue
         full_acc, path = resolve_full_accuracy(
             scratch, row['dataset'], row['architecture'], row['seed'],
-            template=template, cache=cache)
+            template=template, cache=cache, variant=variant)
         row['full_acc'] = full_acc
         row['full_metrics_path'] = path
         row['y'] = abs(full_acc - row['acc']) / 100.0   # percent -> fraction
@@ -532,8 +536,11 @@ def main(argv=None):
                    help='Per-subset CSVs from scripts/analyze/score_subsets.py. '
                         'Files, directories, or globs.')
     p.add_argument('--out_dir', default=None,
-                   help='Default: $SCRATCH/data_selection_baselines/plots')
+                   help='Default: $SCRATCH/data_selection_baselines[/adam]/plots')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "full-data metrics and writes figures under the adam/ subfolders.")
     p.add_argument('--dataset', default=None,
                    help='Fallback for tables written without a dataset column.')
     p.add_argument('--architecture', default=None,
@@ -571,11 +578,12 @@ def main(argv=None):
     logger = logging.getLogger('d_accuracy_scatter')
 
     out_dir = args.out_dir or os.path.join(
-        args.scratch, 'data_selection_baselines', 'plots')
+        tree(args.scratch, 'data_selection_baselines', args.variant), 'plots')
     paths = expand_inputs(args.input)
     logger.info(f"Reading {len(paths)} per-subset table(s).")
     rows = read_rows(paths, args.dataset, args.architecture)
-    attach_accuracy_gap(rows, args.scratch, template=args.full_metrics)
+    attach_accuracy_gap(rows, args.scratch, template=args.full_metrics,
+                        variant=args.variant)
     used = sorted({row['full_metrics_path'] for row in rows if row.get('full_metrics_path')})
     for path in used:
         logger.info(f"Full-data accuracy from {path}")

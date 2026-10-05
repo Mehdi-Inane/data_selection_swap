@@ -92,6 +92,7 @@ from torch.utils.data import random_split
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
+from ..paths import storage_variant, tree
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -740,9 +741,10 @@ def main():
     K = len(checkpoints)
 
     scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
-    base_dir = (
-        f"{scratch_path}/gradmatch_swap/{args.dataset}/{cfg['architecture']}/"
-        f"{budget}/seed_{args.seed}"
+    variant = storage_variant(args.optimizer, args.retrain_optimizer)
+    base_dir = os.path.join(
+        tree(scratch_path, 'gradmatch_swap', variant),
+        args.dataset, cfg['architecture'], str(budget), f"seed_{args.seed}",
     )
     os.makedirs(base_dir, exist_ok=True)
 

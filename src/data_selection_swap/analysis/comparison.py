@@ -82,6 +82,8 @@ import json
 import os
 import re
 
+from ..paths import tree
+
 import numpy as np
 
 N_TRAIN = {
@@ -105,16 +107,17 @@ def load_json(path):
         return json.load(fh)
 
 
-def run_dir(scratch, method, dataset, architecture, budget, seed):
+def run_dir(scratch, method, dataset, architecture, budget, seed, variant=''):
+    """Saved-run directory. ``variant='adam'`` reads the Adam subfolder."""
     if method.startswith('kl_faithful'):
-        return os.path.join(scratch, 'gradmatch_swap', dataset, architecture,
-                            str(budget), f'seed_{seed}')
-    return os.path.join(scratch, 'data_selection_baselines', method, dataset, architecture,
-                        str(budget), f'seed_{seed}')
+        root = tree(scratch, 'gradmatch_swap', variant)
+        return os.path.join(root, dataset, architecture, str(budget), f'seed_{seed}')
+    root = tree(scratch, 'data_selection_baselines', variant)
+    return os.path.join(root, method, dataset, architecture, str(budget), f'seed_{seed}')
 
 
-def discover_methods(scratch, dataset, architecture):
-    kl_root = os.path.join(scratch, 'gradmatch_swap', dataset, architecture)
+def discover_methods(scratch, dataset, architecture, variant=''):
+    kl_root = os.path.join(tree(scratch, 'gradmatch_swap', variant), dataset, architecture)
     kl_pattern = re.compile(
         r'^(kl_faithful(?:_[a-zA-Z0-9]+)*)_\d+_K\d+'
         r'(?:_cfg[0-9a-f]+)?_metrics\.json$')
@@ -126,7 +129,7 @@ def discover_methods(scratch, dataset, architecture):
                 if match:
                     kl_methods.add(match.group(1))
 
-    root = os.path.join(scratch, 'data_selection_baselines')
+    root = tree(scratch, 'data_selection_baselines', variant)
     found = sorted(m for m in os.listdir(root)
                    if os.path.isdir(os.path.join(
                        root, m, dataset, architecture))) if os.path.isdir(root) else []
@@ -397,6 +400,9 @@ def main():
                         'Default: report every K discovered on disk, plus every '
                         'method that does not tag K at all.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "the adam/ subfolders.")
     p.add_argument('--reference_timing', default=None,
                    help='train_time.json of the shared trajectory. Default: '
                         '$SCRATCH/data_selection_swap/<dataset>/checkpoints/train_time.json')
@@ -426,8 +432,8 @@ def main():
     args = p.parse_args()
 
     checkpoint_dir = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, args.architecture,
-        'checkpoints')
+        tree(args.scratch, 'data_selection_swap', args.variant),
+        args.dataset, args.architecture, 'checkpoints')
 
     scorer = None
     if args.data_dir is not None and not args.skip_objective:
@@ -440,7 +446,7 @@ def main():
               "will be blank. Pass --data_dir to compute it.")
 
     methods = args.methods or discover_methods(
-        args.scratch, args.dataset, args.architecture)
+        args.scratch, args.dataset, args.architecture, variant=args.variant)
     warned_methods = set()
     rows = []
     for fraction in args.fractions:
@@ -453,14 +459,14 @@ def main():
                     ref_path = args.reference_timing.format(seed=seed)
                 else:
                     ref_path = os.path.join(
-                        args.scratch, 'data_selection_swap', args.dataset,
-                        args.architecture, 'checkpoints', f'seed_{seed}',
-                        'train_time.json')
+                        tree(args.scratch, 'data_selection_swap', args.variant),
+                        args.dataset, args.architecture, 'checkpoints',
+                        f'seed_{seed}', 'train_time.json')
                 ref = load_json(ref_path)
                 epoch_seconds = ref['epoch_seconds'] if ref else None
                 d = run_dir(
                     args.scratch, method, args.dataset, args.architecture,
-                    budget, seed)
+                    budget, seed, variant=args.variant)
                 for k, metrics_path, timing_path in discover_runs(d, method, budget):
                     if args.checkpoints is not None and k is not None and k not in args.checkpoints:
                         continue

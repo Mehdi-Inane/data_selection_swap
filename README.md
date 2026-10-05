@@ -319,6 +319,13 @@ python scripts/plot/checkpoint_ablation.py \
   --dataset cifar100 \
   --scratch /path/to/scratch
 
+# JL-embedding ablation plot (K in {1, 4}; widths 1024, 2048, 4096).
+# p=0 curves are the exact aggregates from the checkpoint-count runs.
+python scripts/plot/jl_ablation.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --scratch /path/to/scratch
+
 # Do the architectures (and the baselines) pick the same examples?
 python scripts/analyze/selection_overlap.py \
   --dataset cifar10 \
@@ -381,6 +388,7 @@ sbatch scripts/slurm/run_kl_selection.sh
 sbatch scripts/slurm/run_kl_full_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
+sbatch scripts/slurm/run_kl_full_jl_ablation.sh   # K in {1, 4}, widths 1024/2048/4096
 sbatch scripts/slurm/run_transfer_d.sh   # one array task per target architecture
 
 # Controlled multi-stage suites (submitters add strict afterok dependencies)

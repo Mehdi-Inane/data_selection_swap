@@ -16,11 +16,20 @@
 set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(git -C "${SLURM_SUBMIT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || true)}"
+SCRIPT_DIR="${PROJECT_ROOT}/scripts/slurm"
 if [ -z "$PROJECT_ROOT" ] || [ ! -f "${PROJECT_ROOT}/scripts/analyze/score_kernel.py" ]; then
     echo "Cannot locate the repository (PROJECT_ROOT='${PROJECT_ROOT}'). Submit from inside the repo or export PROJECT_ROOT." >&2
     exit 1
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+source "${SCRIPT_DIR}/result_layout.sh"
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
+if [ -z "$VARIANT" ]; then
+    VARIANT_ARG=sgd
+else
+    VARIANT_ARG="$VARIANT"
+fi
 
 module load miniconda/3
 CONDA_ENV="${CONDA_ENV:-kl_select}"
@@ -53,6 +62,7 @@ srun python "${PROJECT_ROOT}/scripts/analyze/score_kernel.py" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
     --weighting "${WEIGHTING:-sgd}" \
+    --variant "$VARIANT_ARG" \
     --metric "${METRIC:-auto}" \
     --scoring_transform "${SCORING_TRANSFORM:-test}" \
     --proj_dim "${PROJ_DIM:-4096}" \

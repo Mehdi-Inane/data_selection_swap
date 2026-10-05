@@ -21,6 +21,12 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
+source "${SCRIPT_DIR}/result_layout.sh"
+
+# OPTIMIZER=sgd keeps the historical trainer and directories.
+# OPTIMIZER=adam trains scripts/train/reference.py into the adam/ subfolder.
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
 
 # ── Environment ──────────────────────────────────────────────────────────────
 module load miniconda/3
@@ -47,7 +53,8 @@ SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
 ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
 DATASET=${DATASETS[$IDX]}
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-SAVE_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+SAVE_DIR="${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
 
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
@@ -67,21 +74,37 @@ echo " Starting Full Reference Trajectory Run"
 echo " Dataset        : $DATASET"
 echo " Architecture   : $ARCHITECTURE"
 echo " Seed           : $SEED"
+echo " Optimizer      : $OPTIMIZER"
 echo " Local Data Dir : $LOCAL_DATA"
 echo " Save Dir       : $SAVE_DIR"
 echo "=================================================="
 
 # ── Run the training script ──────────────────────────────────────────────────
-srun python "${PROJECT_ROOT}/scripts/train/full_data.py" \
-    --dataset "$DATASET" \
-    --architecture "$ARCHITECTURE" \
-    --data_dir "$LOCAL_DATA" \
-    --save_dir "$SAVE_DIR" \
-    --download \
-    --batch_size 128 \
-    --num_workers 4 \
-    --seed "$SEED" \
-    "${RESUME_ARGS[@]}"
+if [ "$VARIANT" = adam ]; then
+    srun python "${PROJECT_ROOT}/scripts/train/reference.py" \
+        --dataset "$DATASET" \
+        --architecture "$ARCHITECTURE" \
+        --optimizer "$OPTIMIZER" \
+        --data_dir "$LOCAL_DATA" \
+        --save_dir "$SAVE_DIR" \
+        --download \
+        --batch_size 128 \
+        --num_workers 4 \
+        --seed "$SEED" \
+        --checkpoint_schedule full_data \
+        "${RESUME_ARGS[@]}"
+else
+    srun python "${PROJECT_ROOT}/scripts/train/full_data.py" \
+        --dataset "$DATASET" \
+        --architecture "$ARCHITECTURE" \
+        --data_dir "$LOCAL_DATA" \
+        --save_dir "$SAVE_DIR" \
+        --download \
+        --batch_size 128 \
+        --num_workers 4 \
+        --seed "$SEED" \
+        "${RESUME_ARGS[@]}"
+fi
 
 echo "=================================================="
 echo "Trajectory generation complete!"

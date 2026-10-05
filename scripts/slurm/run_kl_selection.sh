@@ -20,6 +20,13 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
+source "${SCRIPT_DIR}/result_layout.sh"
+
+# OPTIMIZER=adam selects the Adam objective, retrains at lr 0.001 unless LR
+# is set, and reads/writes the adam/ subfolders.
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
+LR="$(layout_retrain_lr "$OPTIMIZER")"
 
 # ── Environment ──────────────────────────────────────────────────────────────
 module load miniconda/3
@@ -38,7 +45,6 @@ SEEDS=(42 43 44 45 46)
 
 MAX_ITERS="${MAX_ITERS:-2000}"
 BATCH_SIZE=128
-LR=0.01
 NUM_WORKERS=4
 NUM_CHECKPOINTS="${NUM_CHECKPOINTS:-4}"   # How many checkpoints build the kernel
                                           # (0 = every checkpoint found).
@@ -58,9 +64,8 @@ CHECKPOINT_SELECTION="${CHECKPOINT_SELECTION:-spread}"
 CHECKPOINT_WEIGHTING="${CHECKPOINT_WEIGHTING:-point}"
 
 # A short prefix sits on an almost-flat part of the cosine schedule, so the
-# default spreads checkpoints over the run. Adam needs an optimizer-aware
-# trajectory; point CHECKPOINT_DIR at the output of scripts/train/reference.py.
-OPTIMIZER="${OPTIMIZER:-sgd}"
+# default spreads checkpoints over the run. Adam reads the adam/ reference
+# tree written by OPTIMIZER=adam scripts/slurm/run_full_data.sh.
 METRIC="${METRIC:-auto}"          # auto | none | adam
 # 'ranked' is Algorithm 3 (stops at its first rejected top-ranked pair);
 # 'best' is the exact best-swap search with screening.
@@ -71,7 +76,6 @@ RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-}"
 # Shared retraining initialisation (per seed, set below once SEED is known):
 # the first run writes it and the rest load it, so two selectors are compared
 # from the same weights. Set INIT_CKPT_DIR="" to opt out.
-INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH:-./scratch}/data_selection_swap/init}"
 
 # ── Map flat task ID → (dataset, architecture, fraction, seed) ───────────────
 N_SEEDS=${#SEEDS[@]}
@@ -88,14 +92,17 @@ FRACTION=${FRACTIONS[$(( IDX % N_FRACTIONS ))]}; IDX=$(( IDX / N_FRACTIONS ))
 ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
 DATASET=${DATASETS[$IDX]}
 
+# ── Paths Configuration ──────────────────────────────────────────────────────
+SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+if [ -z "${INIT_CKPT_DIR+x}" ]; then
+    INIT_CKPT_DIR="${SWAP_ROOT}/init"
+fi
 INIT_ARGS=()
 if [ -n "$INIT_CKPT_DIR" ]; then
     INIT_ARGS=(--init_ckpt "${INIT_CKPT_DIR}/${DATASET}_${ARCHITECTURE}_seed${SEED}.pth")
 fi
-
-# ── Paths Configuration ──────────────────────────────────────────────────────
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 if [ ! -d "$CHECKPOINT_DIR" ]; then

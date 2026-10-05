@@ -37,6 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..paths import tree
 from .comparison import N_TRAIN
 from .result_plots import (
     KL_DISPLAY_NAME,
@@ -76,9 +77,9 @@ def kernel_scoring_id(dataset, architecture, weighting, metric, num_checkpoints,
     return f"{base}|proj={int(proj_dim)}|proj_seed={int(proj_seed)}"
 
 
-def kernel_path(scratch, dataset, architecture, seed, proj_dim):
+def kernel_path(scratch, dataset, architecture, seed, proj_dim, variant=''):
     return os.path.join(
-        scratch, 'data_selection_swap', 'kernels', dataset, architecture,
+        tree(scratch, 'data_selection_swap', variant), 'kernels', dataset, architecture,
         f'seed_{seed}', f'kernel_p{int(proj_dim)}.pt')
 
 
@@ -228,8 +229,8 @@ def precompute_seed(args, seed, logger):
         cfg, seed, args.batch_size, args.num_workers, args.scoring_transform)
     pool_hash = common.ordered_indices_fingerprint(trainset.indices)
     template = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset,
-        cfg['architecture'], 'checkpoints')
+        tree(args.scratch, 'data_selection_swap', args.variant),
+        args.dataset, cfg['architecture'], 'checkpoints')
     checkpoint_dir = locate_checkpoint_dir(template, seed)
     checkpoints, _, description = ref.resolve(
         checkpoint_dir, optimizer=args.weighting,
@@ -245,7 +246,8 @@ def precompute_seed(args, seed, logger):
         expected_pool_indices_sha256=pool_hash)
     identity = _identity(args, seed, pool_hash, checkpoints, description)
     path = args.kernel_out or kernel_path(
-        args.scratch, args.dataset, cfg['architecture'], seed, args.proj_dim)
+        args.scratch, args.dataset, cfg['architecture'], seed, args.proj_dim,
+        args.variant)
     partial = path + '.partial'
     logger.info(
         f"Seed {seed}: {len(checkpoints)} checkpoints ({description}), "
@@ -352,6 +354,9 @@ def score_seed_rows(rows, path, args, seed, logger):
 
 
 def _add_trajectory_args(p):
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' uses "
+                        "the adam/ subfolders.")
     p.add_argument('--num_checkpoints', default=0, type=int,
                    help='0 = every saved checkpoint.')
     p.add_argument('--checkpoint_selection', default='spread',
@@ -434,7 +439,7 @@ def score_main(argv=None):
     logger = logging.getLogger('score_kernel')
 
     out_dir = args.out_dir or os.path.join(
-        args.scratch, 'data_selection_baselines', 'plots')
+        tree(args.scratch, 'data_selection_baselines', args.variant), 'plots')
     cache_path = args.cache_csv or os.path.join(
         out_dir, f"d_kernel_{args.dataset}_{args.architecture}_p{int(args.proj_dim)}.csv")
     scoring = kernel_scoring_id(
@@ -444,7 +449,7 @@ def score_main(argv=None):
 
     rows = collect_runs(
         args.scratch, args.dataset, args.architecture, args.fractions,
-        args.seeds, args.methods)
+        args.seeds, args.methods, variant=args.variant)
     if not rows:
         logger.error(f"No runs found under {args.scratch} for "
                      f"{args.dataset}/{args.architecture}.")
@@ -458,7 +463,8 @@ def score_main(argv=None):
             by_seed.setdefault(row['seed'], []).append(row)
     for seed, seed_rows in sorted(by_seed.items()):
         path = kernel_path(
-            args.scratch, args.dataset, args.architecture, seed, args.proj_dim)
+            args.scratch, args.dataset, args.architecture, seed, args.proj_dim,
+            args.variant)
         if not os.path.isfile(path):
             raise FileNotFoundError(
                 f"No kernel for seed {seed}: {path}. "

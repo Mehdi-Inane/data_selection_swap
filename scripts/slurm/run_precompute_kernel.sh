@@ -25,6 +25,14 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
     exit 1
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+source "${SCRIPT_DIR}/result_layout.sh"
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
+if [ -z "$VARIANT" ]; then
+    VARIANT_ARG=sgd
+else
+    VARIANT_ARG="$VARIANT"
+fi
 
 module load miniconda/3
 CONDA_ENV="${CONDA_ENV:-kl_select}"
@@ -51,7 +59,8 @@ ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARC
 DATASET=${DATASETS[$IDX]}
 
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
@@ -74,6 +83,7 @@ srun python "${PROJECT_ROOT}/scripts/analyze/precompute_kernel.py" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
     --weighting "${WEIGHTING:-sgd}" \
+    --variant "$VARIANT_ARG" \
     --metric "${METRIC:-auto}" \
     --scoring_transform "${SCORING_TRANSFORM:-test}" \
     --proj_dim "${PROJ_DIM:-4096}" \

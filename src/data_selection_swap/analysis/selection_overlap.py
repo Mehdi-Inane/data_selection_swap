@@ -68,6 +68,7 @@ import sys
 import numpy as np
 import torch
 
+from ..paths import tree
 from .comparison import N_TRAIN, load_json, run_dir
 from .d_accuracy_scatter import expand_inputs
 from .result_plots import is_kl_method
@@ -180,10 +181,11 @@ def _indices_pattern(method, budget):
         rf'(?:_cfg(?P<run_id>[0-9a-f]+))?_indices\.pt$')
 
 
-def discover_methods(scratch, dataset, architecture):
+def discover_methods(scratch, dataset, architecture, variant=''):
     """Every KL variant and baseline that saved indices for this architecture."""
     kl_methods = set()
-    kl_root = os.path.join(scratch, 'gradmatch_swap', dataset, architecture)
+    kl_root = os.path.join(
+        tree(scratch, 'gradmatch_swap', variant), dataset, architecture)
     if os.path.isdir(kl_root):
         for _, _, files in os.walk(kl_root):
             for fname in files:
@@ -191,7 +193,7 @@ def discover_methods(scratch, dataset, architecture):
                 if match:
                     kl_methods.add(match.group(1))
 
-    root = os.path.join(scratch, 'data_selection_baselines')
+    root = tree(scratch, 'data_selection_baselines', variant)
     baselines = sorted(
         name for name in os.listdir(root)
         if os.path.isdir(os.path.join(root, name, dataset, architecture))
@@ -284,12 +286,13 @@ def load_indices(path):
 
 
 def collect_subsets(scratch, dataset, architectures, fractions, seeds,
-                    methods=None, checkpoints=None, logger=None):
+                    methods=None, checkpoints=None, logger=None, variant=''):
     """One record per saved subset, with its indices already loaded."""
     logger = logger or logging.getLogger('selection_overlap')
     records = []
     for architecture in architectures:
-        names = methods or discover_methods(scratch, dataset, architecture)
+        names = methods or discover_methods(
+            scratch, dataset, architecture, variant=variant)
         if not names:
             logger.warning(f"No saved subsets found for architecture {architecture}.")
             continue
@@ -298,7 +301,7 @@ def collect_subsets(scratch, dataset, architectures, fractions, seeds,
             for method in names:
                 for seed in seeds:
                     directory = run_dir(scratch, method, dataset, architecture,
-                                        budget, seed)
+                                        budget, seed, variant=variant)
                     for k, path in discover_subsets(directory, method, budget):
                         if checkpoints is not None and k is not None and k not in checkpoints:
                             continue
@@ -1162,6 +1165,9 @@ def main(argv=None):
     p.add_argument('--checkpoints', default=None, type=int, nargs='+',
                    help="Restrict to runs tagged with these K values.")
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "the adam/ subfolders.")
     p.add_argument('--data_dir', default=None,
                    help='Dataset root. Only the labels are read (no images decoded, no '
                         'GPU); it turns on kappa_stratified and the class-histogram '
@@ -1188,17 +1194,18 @@ def main(argv=None):
                         handlers=[logging.StreamHandler(sys.stdout)])
     logger = logging.getLogger('selection_overlap')
 
-    out_dir = args.out_dir or os.path.join(args.scratch, 'data_selection_baselines')
+    out_dir = args.out_dir or tree(
+        args.scratch, 'data_selection_baselines', args.variant)
     plot_dir = args.plot_dir or os.path.join(out_dir, 'plots')
 
     records = collect_subsets(args.scratch, args.dataset, args.architectures,
                               args.fractions, args.seeds, args.methods,
-                              args.checkpoints, logger)
+                              args.checkpoints, logger, variant=args.variant)
     if not records:
         logger.error(
             "No saved subsets found. Expected *_indices.pt under "
-            f"{os.path.join(args.scratch, 'gradmatch_swap', args.dataset)} and "
-            f"{os.path.join(args.scratch, 'data_selection_baselines')}.")
+            f"{os.path.join(tree(args.scratch, 'gradmatch_swap', args.variant), args.dataset)} and "
+            f"{tree(args.scratch, 'data_selection_baselines', args.variant)}.")
         return {}
     logger.info(f"Loaded {len(records)} saved subsets across "
                 f"{len({r['architecture'] for r in records})} architecture(s), "

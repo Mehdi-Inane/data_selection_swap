@@ -62,8 +62,10 @@ from scipy.stats import spearmanr
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
+from ..paths import tree
 from .comparison import (N_TRAIN, RANDOM_METHOD, discover_methods,
                          discover_runs, indices_path_for, load_json, run_dir)
+from .result_plots import locate_checkpoint_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +79,8 @@ def final_accuracy(metrics_path):
     return float(metrics[last_epoch])
 
 
-def collect_rows(scratch, dataset, architecture, fractions, seeds, methods, checkpoints):
+def collect_rows(scratch, dataset, architecture, fractions, seeds, methods, checkpoints,
+                 variant=''):
     """One row per saved run: (fraction, method, K, seed, indices_path, acc)."""
     rows = []
     for fraction in fractions:
@@ -85,7 +88,8 @@ def collect_rows(scratch, dataset, architecture, fractions, seeds, methods, chec
         for method in methods:
             for seed in seeds:
                 d = run_dir(
-                    scratch, method, dataset, architecture, budget, seed)
+                    scratch, method, dataset, architecture, budget, seed,
+                    variant=variant)
                 for k, metrics_path, _ in discover_runs(d, method, budget):
                     if checkpoints is not None and k is not None and k not in checkpoints:
                         continue
@@ -210,12 +214,13 @@ def print_correlations(corr, logger):
                     f"{c['pooled_centred']:<20.3f}{c['n_points']:<5}")
 
 
-def default_out_csv(scratch, dataset, architecture, fractions):
+def default_out_csv(scratch, dataset, architecture, fractions, variant=''):
     """Per-subset table path. A single-fraction run carries a fraction tag so
     that scoring 0.2 afterwards does not overwrite the 0.1 table."""
     tag = f'_f{fractions[0]:g}' if len(fractions) == 1 else ''
-    return os.path.join(scratch, 'data_selection_baselines',
-                        f'd_exact_{dataset}_{architecture}{tag}.csv')
+    return os.path.join(
+        tree(scratch, 'data_selection_baselines', variant),
+        f'd_exact_{dataset}_{architecture}{tag}.csv')
 
 
 def write_csv(path, scored, dataset, architecture):
@@ -250,6 +255,9 @@ def main():
                         'checkpoints/seed_{seed}. A distinct, manifest-validated trajectory '
                         'is required for every split seed.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "and writes the adam/ subfolders.")
     p.add_argument('--fractions', default=[0.1, 0.2, 0.4, 0.5], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--methods', default=None, nargs='+',
@@ -270,11 +278,12 @@ def main():
     p.add_argument('--checkpoint_epochs', default=None, type=int, nargs='+',
                    help='Choose the scoring trajectory by epoch number instead, e.g. '
                         '1 5 10 20 40 70 110 160 220 300. Overrides the two above.')
-    p.add_argument('--weighting', '--optimizer', dest='weighting', default='uniform',
+    p.add_argument('--weighting', '--optimizer', dest='weighting', default=None,
                    choices=list(ref.OPTIMIZERS),
                    help='(w_t, M_t), shared with the selection scripts. See '
-                        'trajectory.py. The adam variants need a '
-                        'scripts/train/reference.py --optimizer adam trajectory.')
+                        'trajectory.py. Default uniform, or adam when --variant adam. '
+                        'The adam variants need a scripts/train/reference.py '
+                        '--optimizer adam trajectory.')
     p.add_argument('--metric', default='auto', choices=list(ref.METRICS),
                    help='Override M_t independently of the step weight, e.g. '
                         '--weighting uniform --metric adam for a flat-eta prefix '
@@ -296,7 +305,8 @@ def main():
     p.add_argument('--num_workers', default=4, type=int)
     p.add_argument('--gbar_cache_dir', default=None,
                    help='Cache the full-pool mean gradients here (~90 MB per checkpoint per '
-                        'seed). Worth setting if you expect to re-run.')
+                        'seed). Default when unset: '
+                        '$SCRATCH/data_selection_swap[/adam]/gbar_cache.')
     p.add_argument('--out_csv', default=None,
                    help='Default: $SCRATCH/data_selection_baselines/'
                         'd_exact_<dataset>_<architecture>[_f<fraction>].csv. The '
@@ -312,20 +322,25 @@ def main():
     cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
                                     architecture=args.architecture)
     architecture = cfg['architecture']
+    if args.weighting is None:
+        args.weighting = 'adam' if args.variant == 'adam' else 'uniform'
+    if args.gbar_cache_dir is None:
+        args.gbar_cache_dir = os.path.join(
+            tree(args.scratch, 'data_selection_swap', args.variant), 'gbar_cache')
     methods = args.methods or discover_methods(
-        args.scratch, args.dataset, architecture)
+        args.scratch, args.dataset, architecture, variant=args.variant)
 
     rows = collect_rows(
         args.scratch, args.dataset, architecture, args.fractions, args.seeds,
-        methods, args.checkpoints)
+        methods, args.checkpoints, variant=args.variant)
     if not rows:
         logger.error(f"No runs found under {args.scratch}. Nothing to score.")
         return
     logger.info(f"Found {len(rows)} saved subsets across {len(methods)} methods.")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     checkpoint_template = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset,
-        cfg['architecture'], 'checkpoints', 'seed_{seed}')
+        tree(args.scratch, 'data_selection_swap', args.variant),
+        args.dataset, cfg['architecture'], 'checkpoints', 'seed_{seed}')
 
     scored = []
 
@@ -337,7 +352,7 @@ def main():
         trainset, _, _, n_train = common.make_loaders(
             cfg, seed, args.batch_size, args.num_workers, args.scoring_transform)
         pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
-        checkpoint_dir = checkpoint_template.format(seed=seed)
+        checkpoint_dir = locate_checkpoint_dir(checkpoint_template, seed)
         checkpoints, _, description = ref.resolve(
             checkpoint_dir, optimizer=args.weighting,
             num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
@@ -423,7 +438,7 @@ def main():
     print_correlations(correlations(scored, args.fractions, args.seeds), logger)
 
     out_csv = args.out_csv or default_out_csv(
-        args.scratch, args.dataset, architecture, args.fractions)
+        args.scratch, args.dataset, architecture, args.fractions, args.variant)
     write_csv(out_csv, scored, args.dataset, architecture)
     logger.info(f"\nPer-subset results → {out_csv}")
 

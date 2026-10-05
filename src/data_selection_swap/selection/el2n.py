@@ -94,7 +94,8 @@ def main():
     if args.offset:
         method += f'_offset{args.offset}'
     paths = common.get_save_paths(
-        method, args.dataset, cfg['architecture'], budget, args.seed)
+        method, args.dataset, cfg['architecture'], budget, args.seed,
+        variant=common.storage_variant(args.retrain_optimizer))
     logger = common.get_logger(__name__, paths['log'])
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  "
                 f"source={args.source}  score_epoch={args.score_epoch}  device={device}")

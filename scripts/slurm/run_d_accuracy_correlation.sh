@@ -19,6 +19,7 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
     exit 1
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+source "${SCRIPT_DIR}/result_layout.sh"
 
 # Override cluster setup when needed, e.g. CONDA_ENV=my_environment.
 if command -v module >/dev/null 2>&1; then
@@ -53,9 +54,14 @@ read -r -a FRACTIONS <<< "${FRACTIONS_OVERRIDE:-0.1 0.2 0.4}"
 read -r -a SAMPLERS <<< "${SAMPLERS_OVERRIDE:-uniform stratified easy hard}"
 
 SCRATCH_BASE="${SCRATCH:-${PROJECT_ROOT}/scratch}"
+REFERENCE_OPTIMIZER="${REFERENCE_OPTIMIZER:-${OPTIMIZER:-sgd}}"
+RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-$REFERENCE_OPTIMIZER}"
+VARIANT="$(layout_variant "$REFERENCE_OPTIMIZER")"
 DATA_ROOT_BASE="${DATA_ROOT_BASE:-${SCRATCH_BASE}/datasets}"
 DATA_DIR="${DATA_ROOT:-${DATA_ROOT_BASE}/${DATASET}}"
-OUTPUT_DIR="${OUTPUT_DIR:-${SCRATCH_BASE}/data_selection_swap/d_correlation}"
+if [ -z "${OUTPUT_DIR+x}" ]; then
+    OUTPUT_DIR="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")/d_correlation"
+fi
 STAGE="${STAGE:-all}"
 mkdir -p "$DATA_DIR" "$OUTPUT_DIR"
 
@@ -78,7 +84,7 @@ srun python "${PROJECT_ROOT}/scripts/experiments/run_d_accuracy_correlation.py" 
     --output-dir "$OUTPUT_DIR" \
     --split-seed "$SEED" \
     --reference-seed "$SEED" \
-    --reference-optimizer "${REFERENCE_OPTIMIZER:-sgd}" \
+    --reference-optimizer "$REFERENCE_OPTIMIZER" \
     --reference-epochs "${REFERENCE_EPOCHS:-0}" \
     --num-d-checkpoints "${NUM_D_CHECKPOINTS:-5}" \
     --reference-resume-every "${REFERENCE_RESUME_EVERY:-5}" \
@@ -88,7 +94,7 @@ srun python "${PROJECT_ROOT}/scripts/experiments/run_d_accuracy_correlation.py" 
     --loss-pool-multiplier "${LOSS_POOL_MULTIPLIER:-2.0}" \
     --d-weighting "${D_WEIGHTING:-uniform}" \
     --d-normalization "${D_NORMALIZATION:-sum}" \
-    --retrain-optimizer "${RETRAIN_OPTIMIZER:-sgd}" \
+    --retrain-optimizer "$RETRAIN_OPTIMIZER" \
     --retrain-epochs "${RETRAIN_EPOCHS:-0}" \
     --retrain-replicates "${RETRAIN_REPLICATES:-1}" \
     --batch-size "${BATCH_SIZE:-128}" \

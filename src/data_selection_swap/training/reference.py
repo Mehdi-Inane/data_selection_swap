@@ -35,8 +35,8 @@ do.
 
 Usage:
     python scripts/train/reference.py --dataset cifar100 --data_dir ... \\
-        --save_dir $SCRATCH/data_selection_swap/cifar100/adam_ref \\
-        --optimizer adam --lr 1e-3 --num_checkpoints 10
+        --save_dir $SCRATCH/data_selection_swap/adam/cifar100/resnet18/checkpoints/seed_42 \\
+        --optimizer adam --lr 1e-3 --checkpoint_schedule full_data
 """
 
 import argparse
@@ -53,6 +53,12 @@ from torch.utils.data import DataLoader
 
 from .. import common
 from .. import trajectory as ref
+
+
+def full_data_checkpoint_epochs(num_epochs):
+    """Epochs ``training.full_data`` snapshots: 1..10, every 10th, and the last."""
+    return [epoch for epoch in range(1, num_epochs + 1)
+            if epoch <= 10 or epoch % 10 == 0 or epoch == num_epochs]
 
 
 def choose_epochs(num_epochs, num_checkpoints, spacing, explicit):
@@ -94,6 +100,11 @@ def main():
     p.add_argument('--num_epochs', default=None, type=int,
                    help="Default: the dataset's own (300 for CIFAR-100).")
     p.add_argument('--num_checkpoints', default=10, type=int)
+    p.add_argument('--checkpoint_schedule', default='spread',
+                   choices=['spread', 'full_data'],
+                   help="'spread' places --num_checkpoints across the run. "
+                        "'full_data' matches training.full_data: epochs 1-10, "
+                        "every 10th epoch, and the last epoch.")
     p.add_argument('--spacing', default='linear', choices=['linear', 'log'],
                    help='How checkpoint epochs are spread over the run.')
     p.add_argument('--checkpoint_epochs', default=None, type=int, nargs='+',
@@ -130,8 +141,11 @@ def main():
                        f"ceil(n/bs) gives {spe}; using the dataloader's value.")
         spe = len(trainloader)
 
+    explicit = args.checkpoint_epochs
+    if explicit is None and args.checkpoint_schedule == 'full_data':
+        explicit = full_data_checkpoint_epochs(num_epochs)
     ckpt_epochs = choose_epochs(num_epochs, args.num_checkpoints, args.spacing,
-                                args.checkpoint_epochs)
+                                explicit)
     ckpt_steps = {e * spe: e for e in ckpt_epochs}
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

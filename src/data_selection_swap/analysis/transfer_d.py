@@ -56,6 +56,7 @@ import torch
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
+from ..paths import tree
 from .comparison import N_TRAIN, RANDOM_METHOD
 from .score_subsets import random_subsets
 from .selection_overlap import collect_subsets, run_label
@@ -89,8 +90,8 @@ def build_scorer(cfg, args, seed, target_architecture, logger):
     pool_hash = common.ordered_indices_fingerprint(trainset.indices)
 
     template = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset, target_architecture,
-        'checkpoints', 'seed_{seed}')
+        tree(args.scratch, 'data_selection_swap', args.variant),
+        args.dataset, target_architecture, 'checkpoints', 'seed_{seed}')
     checkpoints, _, description = ref.resolve(
         resolve_checkpoint_dir(template, seed), optimizer=args.weighting,
         num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
@@ -349,6 +350,9 @@ def main(argv=None):
                         'seed_{seed}. The target architecture\'s own trajectory, since '
                         'that is what defines the objective being transferred to.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' uses "
+                        "the adam/ subfolders.")
     p.add_argument('--fractions', default=[0.1], type=float, nargs='+')
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--methods', default=None, nargs='+',
@@ -395,7 +399,7 @@ def main(argv=None):
     targets = args.target_architectures or list(args.source_architectures)
     records = collect_subsets(args.scratch, args.dataset, args.source_architectures,
                               args.fractions, args.seeds, args.methods,
-                              args.checkpoints, logger)
+                              args.checkpoints, logger, variant=args.variant)
     if not records:
         logger.error(f"No saved subsets found under {args.scratch}. Nothing to score.")
         return []
@@ -417,12 +421,13 @@ def main(argv=None):
     if args.target_architectures and len(targets) == 1:
         tag += f"_to_{targets[0]}"
     out_csv = args.out_csv or os.path.join(
-        args.scratch, 'data_selection_baselines', f'transfer_d_{args.dataset}{tag}.csv')
+        tree(args.scratch, 'data_selection_baselines', args.variant),
+        f'transfer_d_{args.dataset}{tag}.csv')
     logger.info(f"Per-subset transfer results -> {write_csv(out_csv, rows)}")
 
     if not args.no_plots:
         plot_dir = args.plot_dir or os.path.join(
-            args.scratch, 'data_selection_baselines', 'plots')
+            tree(args.scratch, 'data_selection_baselines', args.variant), 'plots')
         draw_all(rows, plot_dir, args.dataset, not args.no_title,
                  tuple(args.formats), logger)
     return rows

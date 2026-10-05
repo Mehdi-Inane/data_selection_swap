@@ -20,6 +20,10 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
     exit 1
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+source "${SCRIPT_DIR}/result_layout.sh"
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
+LR="$(layout_retrain_lr "$OPTIMIZER")"
 
 module load miniconda/3
 CONDA_ENV="${CONDA_ENV:-kl_select}"
@@ -57,9 +61,16 @@ DATASET=${DATASETS[$IDX]}
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+if [ "$VARIANT" = adam ]; then
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
+else
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
-INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH_BASE}/data_selection_swap/init}"
+if [ -z "${INIT_CKPT_DIR+x}" ]; then
+    INIT_CKPT_DIR="${SWAP_ROOT}/init"
+fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
     exit 1
@@ -89,12 +100,12 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --num_checkpoints "$K" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
-    --optimizer "${OPTIMIZER:-sgd}" \
+    --optimizer "$OPTIMIZER" \
     --metric "${METRIC:-auto}" \
     --max_iters "${MAX_ITERS:-200}" \
     --score_batch_size "${SCORE_BATCH_SIZE:-128}" \
     --batch_size 128 \
-    --lr 0.01 \
+    --lr "$LR" \
     --num_workers 4 \
     --download \
     --scoring_transform "${SCORING_TRANSFORM:-test}" \

@@ -30,6 +30,18 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
     exit 1
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+source "${SCRIPT_DIR}/result_layout.sh"
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
+if [ -z "$VARIANT" ]; then
+    VARIANT_ARG=sgd
+    WEIGHTING="${WEIGHTING:-sgd}"
+    METRIC="${METRIC:-none}"
+else
+    VARIANT_ARG="$VARIANT"
+    WEIGHTING="${WEIGHTING:-adam}"
+    METRIC="${METRIC:-auto}"
+fi
 
 module load miniconda/3
 CONDA_ENV="${CONDA_ENV:-kl_select}"
@@ -56,7 +68,8 @@ TARGET=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECT
 DATASET=${DATASETS[$IDX]}
 
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SCRATCH_BASE}/data_selection_swap/${DATASET}/${TARGET}/checkpoints}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${TARGET}/checkpoints}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     echo "Missing reference trajectory for the target architecture: $CHECKPOINT_DIR" >&2
@@ -81,11 +94,12 @@ srun python "${PROJECT_ROOT}/scripts/analyze/transfer_d.py" \
     --num_checkpoints "${NUM_CHECKPOINTS:-0}" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
-    --weighting "${WEIGHTING:-sgd}" \
-    --metric "${METRIC:-none}" \
+    --weighting "$WEIGHTING" \
+    --metric "$METRIC" \
+    --variant "$VARIANT_ARG" \
     --scoring_transform "${SCORING_TRANSFORM:-test}" \
     --n_random "${N_RANDOM:-3}" \
-    --gbar_cache_dir "${SCRATCH_BASE}/data_selection_swap/gbar_cache" \
+    --gbar_cache_dir "${SWAP_ROOT}/gbar_cache" \
     --batch_size 256 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --download
