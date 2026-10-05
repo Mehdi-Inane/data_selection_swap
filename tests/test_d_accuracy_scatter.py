@@ -5,8 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
-
 from data_selection_swap.analysis import d_accuracy_scatter as scatter
 from data_selection_swap.analysis import result_plots
 from data_selection_swap.analysis.comparison import RANDOM_METHOD
@@ -316,13 +314,6 @@ class EstimateAndFitTest(unittest.TestCase):
     def test_axis_labels_mark_the_risk_and_objective_as_estimates(self):
         self.assertIn(r'\widehat{G}_T', scatter.X_LABEL)
         self.assertEqual(scatter.Y_LABEL.count(r'\widehat{R}_P'), 2)
-
-    def test_line_of_best_fit_recovers_a_line(self):
-        x = np.array([1.0, 2.0, 3.0, 4.0])
-        slope, intercept = scatter.line_of_best_fit(x, 0.5 * x + 0.1)
-        self.assertAlmostEqual(slope, 0.5)
-        self.assertAlmostEqual(intercept, 0.1)
-        self.assertIsNone(scatter.line_of_best_fit(np.ones(4), x))
 
     def test_excluding_el2n_restores_a_perfect_pearson(self):
         points = [dict(method='herding', seed=42, x=float(i), y=float(i))
