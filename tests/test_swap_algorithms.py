@@ -56,12 +56,16 @@ def _weighted_sq_norm(v, metric=None):
 
 objective.weighted_sq_norm = _weighted_sq_norm
 trajectory = types.ModuleType(f"{PACKAGE}.trajectory")
+paths = types.ModuleType(f"{PACKAGE}.paths")
+paths.storage_variant = lambda *names: ''
+paths.tree = lambda scratch, root_name, variant='': scratch
 sys.modules.update({
     PACKAGE: package,
     f"{PACKAGE}.selection": selection_package,
     f"{PACKAGE}.common": common,
     f"{PACKAGE}.objective": objective,
     f"{PACKAGE}.trajectory": trajectory,
+    f"{PACKAGE}.paths": paths,
 })
 
 kl = _load("kl")
@@ -398,6 +402,23 @@ class SketchedTrajectoryTest(unittest.TestCase):
         self.assertEqual(diag["proj_dim"], 8)
         self.assertEqual(diag["proj_seed"], 2)
         self.assertGreater(diag["swaps"], 0)
+
+    def test_init_index_is_the_subset_when_no_swaps_run(self):
+        traj, _, _ = self._trajectory(proj_dim=0)
+        index = torch.tensor([8, 1, 4, 3])
+        ordered = torch.tensor([1, 3, 4, 8])
+        traj.set_subset(ordered)
+        expected = traj.D(ordered.numel())
+        returned, history, diag = kl_full.gradient_ranked_single_swap(
+            traj, 4, max_iters=0, init_index=index)
+        self.assertEqual(returned.tolist(), ordered.tolist())
+        self.assertAlmostEqual(history[0]["D"], expected, places=6)
+        self.assertEqual(diag["swaps"], 0)
+
+        fresh, _, _ = self._trajectory(proj_dim=0)
+        with self.assertRaises(ValueError):
+            kl_full.gradient_ranked_single_swap(
+                fresh, 4, max_iters=0, init_index=torch.tensor([1, 2, 3]))
 
     def test_unsketched_aggregate_matches_full_residual(self):
         traj, grads, checkpoints = self._trajectory(proj_dim=0)

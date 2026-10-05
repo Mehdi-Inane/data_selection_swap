@@ -326,6 +326,13 @@ python scripts/plot/jl_ablation.py \
   --architecture resnet18 \
   --scratch /path/to/scratch
 
+# Baseline warm start: accuracy and all-checkpoint G_T before and after KL
+python scripts/plot/baseline_warmstart.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --fraction 0.1 \
+  --scratch /path/to/scratch
+
 # Do the architectures (and the baselines) pick the same examples?
 python scripts/analyze/selection_overlap.py \
   --dataset cifar10 \
@@ -389,6 +396,8 @@ sbatch scripts/slurm/run_kl_full_selection.sh
 sbatch scripts/slurm/run_baselines.sh
 sbatch scripts/slurm/run_checkpoint_ablation.sh
 sbatch scripts/slurm/run_kl_full_jl_ablation.sh   # K in {1, 4}, widths 1024/2048/4096
+sbatch scripts/slurm/run_kl_full_from_baselines.sh  # CIFAR-10 ResNet-18, 10%, K=10 from four baselines
+sbatch scripts/slurm/run_score_warmstart.sh         # all-checkpoint G_T, table, and slope plot
 sbatch scripts/slurm/run_transfer_d.sh   # one array task per target architecture
 
 # Controlled multi-stage suites (submitters add strict afterok dependencies)

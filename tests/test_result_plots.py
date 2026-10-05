@@ -244,6 +244,61 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             self.assertIn(r"ResNet-18 & 4 & 0 & -- & -- \\", text)
             self.assertIn(r"ResNet-18 & 4 & 1024 & -- & -- \\", text)
 
+    def test_warmstart_pairs_keep_baseline_accuracy_and_cached_g(self):
+        from data_selection_swap.analysis import baseline_warmstart
+
+        budget = 4500
+        with tempfile.TemporaryDirectory() as scratch:
+            seed_dir = (Path(scratch) / "data_selection_baselines" / "herding"
+                        / "cifar10" / "resnet18" / str(budget) / "seed_42")
+            seed_dir.mkdir(parents=True)
+            before = seed_dir / f"herding_{budget}"
+            before.with_name(f"herding_{budget}_metrics.json").write_text(
+                json.dumps({"50": 70.0, "100": 80.0}), encoding="utf-8")
+            torch = __import__("torch")
+            torch.save(torch.tensor([1, 2, 3]), before.with_name(f"herding_{budget}_indices.pt"))
+
+            warm_dir = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
+                        / str(budget) / "seed_42")
+            warm_dir.mkdir(parents=True)
+            warm_name = f"kl_faithful_full_resnet18_sgd_from_herding_{budget}_K10"
+            (warm_dir / f"{warm_name}_metrics.json").write_text(
+                json.dumps({"50": 85.0, "300": 90.0}), encoding="utf-8")
+            torch.save(torch.tensor([4, 5, 6]), warm_dir / f"{warm_name}_indices.pt")
+
+            plots = Path(scratch) / "data_selection_baselines" / "plots"
+            plots.mkdir()
+            scoring = baseline_warmstart.gt_scoring_id("cifar10", "resnet18")
+            indices = (seed_dir / f"herding_{budget}_indices.pt").resolve()
+            (plots / "d_exact_cifar10_resnet18.csv").write_text(
+                "scoring_id,indices_path,d_alpha\n"
+                f"{scoring},{indices.as_posix()},1.25\n",
+                encoding="utf-8")
+
+            pairs = baseline_warmstart.collect_pairs(
+                scratch, "cifar10", "resnet18", 0.1, [42], ["herding"])
+            self.assertEqual(len(pairs), 1)
+            self.assertAlmostEqual(pairs[0]["acc_before"], 80.0)
+            self.assertAlmostEqual(pairs[0]["acc_after"], 90.0)
+            baseline_warmstart.fill_g(pairs, str(plots / "d_exact_cifar10_resnet18.csv"), scoring)
+            self.assertAlmostEqual(pairs[0]["g_before"], 1.25)
+            self.assertIsNone(pairs[0]["g_after"])
+
+            summary = baseline_warmstart.summarize(pairs, ["herding"])
+            tex = Path(scratch) / "warmstart.tex"
+            baseline_warmstart.write_warmstart_latex(
+                str(tex), summary, "cifar10", "resnet18", 0.1)
+            text = tex.read_text(encoding="utf-8")
+            self.assertIn("Herding & 80.00 $\\pm$ 0.00 & 90.00 $\\pm$ 0.00", text)
+            self.assertIn("1.25 $\\pm$ 0", text)
+            self.assertIn("& -- \\\\", text)
+
+            pairs[0]["g_after"] = 0.5
+            summary = baseline_warmstart.summarize(pairs, ["herding"])
+            pdf = Path(scratch) / "warmstart.pdf"
+            baseline_warmstart.plot_slopes(summary, str(pdf))
+            self.assertGreater(pdf.stat().st_size, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

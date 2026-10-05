@@ -422,10 +422,42 @@ class Trajectory:
 # Algorithm 3
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _starting_index(n, m, seed, init_index, device):
+    """Sorted pool positions of the subset Algorithm 3 starts from.
+
+    ``init_index`` is that subset. Without it the start is a seeded random
+    draw of size ``m``.
+    """
+    if init_index is None:
+        generator = torch.Generator(device='cpu')
+        if seed is not None:
+            generator.manual_seed(seed)
+        return torch.randperm(n, generator=generator)[:m].to(device).sort().values
+    index = torch.as_tensor(init_index).detach().reshape(-1).cpu()
+    if index.dtype.is_floating_point or index.dtype == torch.bool:
+        raise ValueError(
+            f"init_index must be integer pool positions, got dtype {index.dtype}")
+    index = index.to(torch.long)
+    if index.numel() != m:
+        raise ValueError(
+            f"init_index has {index.numel()} entries; the budget is {m}")
+    if int(index.unique().numel()) != m:
+        raise ValueError("init_index contains duplicate positions")
+    if m and (int(index.min()) < 0 or int(index.max()) >= n):
+        raise ValueError(
+            f"init_index positions must lie in 0..{n - 1}, "
+            f"got {int(index.min())}..{int(index.max())}")
+    return index.to(device).sort().values
+
+
 def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
-                                candidates=1, refresh_every=0, logger=None, seed=None):
+                                candidates=1, refresh_every=0, logger=None, seed=None,
+                                init_index=None):
     """
     Rank exchanges by h, then accept only on a negative *exact* change.
+
+    ``init_index`` starts the search from that subset instead of a random one.
+    With ``max_iters=0`` the returned subset is that index, sorted.
 
     swaps_per_sweep > 1 exchanges the s worst-ranked selected points for
     the s best-ranked unselected ones in a single step. The gradient
@@ -457,10 +489,7 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
     if refresh_every < 0:
         raise ValueError("refresh_every must be non-negative")
 
-    g = torch.Generator(device='cpu')
-    if seed is not None:
-        g.manual_seed(seed)
-    index = torch.randperm(n, generator=g)[:m].to(traj.X.device).sort().values
+    index = _starting_index(n, m, seed, init_index, traj.X.device)
     selected = torch.zeros(n, dtype=torch.bool, device=traj.X.device)
     selected[index] = True
     traj.set_subset(index)
@@ -697,6 +726,13 @@ def main():
     p.add_argument('--proj_seed',      default=0,           type=int,
                    help='Seed of the count sketch. Independent of --seed so the '
                         'embedding is shared across data seeds.')
+    p.add_argument('--init_indices',   default=None,        type=str,
+                   help='Pool-relative indices to start from, as saved in '
+                        '*_indices.pt. Length must equal the budget.')
+    p.add_argument('--init_method',    default=None,        type=str,
+                   help='Baseline that produced --init_indices. Required with it, '
+                        'and written into the filename as _from_<method> so the '
+                        'warm start does not share a cold-start K cell.')
     args = p.parse_args()
 
     common.set_seed(args.seed)
@@ -725,6 +761,21 @@ def main():
         generator=torch.Generator().manual_seed(args.seed),
     )
     pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
+
+    init_index = None
+    init_indices_sha256 = None
+    if args.init_indices or args.init_method:
+        if not args.init_indices or not args.init_method:
+            raise ValueError("--init_indices and --init_method must be set together")
+        if not args.init_method.isidentifier():
+            raise ValueError(
+                "--init_method must be a single filename token, "
+                f"got {args.init_method!r}")
+        if not os.path.isfile(args.init_indices):
+            raise ValueError(f"Initial indices not found: {args.init_indices}")
+        loaded = common.torch_load(args.init_indices, map_location='cpu')
+        init_index = _starting_index(n_train, budget, None, loaded, 'cpu')
+        init_indices_sha256 = common.ordered_indices_fingerprint(init_index.tolist())
 
     if not os.path.isdir(args.checkpoint_dir):
         raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
@@ -755,6 +806,8 @@ def main():
         method += f'_{args.scoring_transform}view'
     if args.proj_dim:
         method += f'_jl{args.proj_dim}'
+    if args.init_method:
+        method += f'_from_{args.init_method}'
     if manifest is not None:
         trajectory_identity = {
             'manifest_run_id': manifest.get('run_id'),
@@ -777,11 +830,15 @@ def main():
                       'checkpoint_dir': os.path.realpath(args.checkpoint_dir),
                       'data_dir': os.path.realpath(args.data_dir),
                       'init_ckpt': (os.path.realpath(args.init_ckpt)
-                                    if args.init_ckpt else None)},
+                                    if args.init_ckpt else None),
+                      'init_indices': (os.path.realpath(args.init_indices)
+                                       if args.init_indices else None)},
         'resolved': {
             'dataset': args.dataset, 'architecture': cfg['architecture'],
             'n_train': n_train, 'budget': budget,
             'pool_indices_sha256': pool_indices_sha256,
+            'init_method': args.init_method,
+            'init_indices_sha256': init_indices_sha256,
             'trajectory': trajectory_identity,
             'checkpoints': [
                 {'path': os.path.realpath(c.path), 'epoch': c.epoch,
@@ -812,7 +869,8 @@ def main():
     logger.info(f"metric={'D_k^2' if use_metric else 'I'}  "
                 f"scoring_transform={args.scoring_transform}  "
                 f"retrain_optimizer={args.retrain_optimizer}  "
-                f"init_ckpt={args.init_ckpt}")
+                f"init_ckpt={args.init_ckpt}  "
+                f"init_method={args.init_method}")
     if args.optimizer == 'uniform' and not use_metric:
         logger.warning("--optimizer uniform --metric none: w_k = 1 and M_k = I, so this "
                        "run uses neither the learning-rate weighting nor the Adam "
@@ -891,7 +949,8 @@ def main():
         selected_indices, history, diag = gradient_ranked_single_swap(
             traj, budget, max_iters=args.max_iters,
             swaps_per_sweep=args.swaps_per_sweep, candidates=args.candidates,
-            refresh_every=args.refresh_every, logger=logger, seed=args.seed)
+            refresh_every=args.refresh_every, logger=logger, seed=args.seed,
+            init_index=init_index)
     logger.info(f"{diag['sweeps']} sweeps, {diag['swaps']} accepted swaps, "
                 f"{len(selected_indices)} samples selected. "
                 f"D: {history[0]['D']:.6e} -> {diag['D']:.6e}")
