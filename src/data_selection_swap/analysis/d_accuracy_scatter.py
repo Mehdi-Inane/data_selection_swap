@@ -26,9 +26,8 @@ Figure
 ──────
 A single scatter with one marker per run (method, K, seed): NO seed averaging,
 no legend, one colour. An inset zooms on the densest zone of the cloud and is
-outlined by a dotted box on the main axes. A least-squares line is drawn
-through every point. The pooled Pearson correlation is written in the corner
-opposite the inset.
+outlined by a dotted box on the main axes. The pooled Pearson correlation is
+written in the corner opposite the inset.
 
 Correlations
 ────────────
@@ -322,18 +321,6 @@ def correlation(points, min_group=3):
     )
 
 
-def line_of_best_fit(x, y):
-    """Ordinary least-squares slope and intercept, or None if x does not vary."""
-    x = np.asarray(x, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
-    if x.size < 2 or np.ptp(x) == 0.0:
-        return None
-    slope, intercept = np.polyfit(x, y, 1)
-    if not (np.isfinite(slope) and np.isfinite(intercept)):
-        return None
-    return float(slope), float(intercept)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Styling
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,11 +392,9 @@ def densest_box(x, y, frac=0.6, radius=0.15, pad=0.08):
     return box
 
 
-def _draw_fit(ax, x, slope, intercept):
-    """OLS line sampled in data units, so it stays linear when x is logarithmic."""
-    xs = np.linspace(float(np.min(x)), float(np.max(x)), 200)
-    ax.plot(xs, intercept + slope * xs, color='black', lw=1.15, zorder=2,
-            solid_capstyle='round')
+def _quiet_font_subsetting():
+    """PDF export subsets embedded fonts and logs every table it touches."""
+    logging.getLogger("fontTools").setLevel(logging.WARNING)
 
 
 def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=True,
@@ -419,6 +404,7 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
 
     Returns the correlation stats, or None if nothing could be drawn.
     """
+    _quiet_font_subsetting()
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -446,7 +432,6 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
         centred_pearson_no_el2n=robust['centred_pearson'],
         n_centred_no_el2n=robust['n_centred'],
     )
-    fit = line_of_best_fit(x, y)
     box = tuple(zoom_box) if zoom_box else densest_box(x, y, zoom_frac)
     inset_bounds, (tx, ty, tha, tva) = INSET_LAYOUT[inset_loc]
     scatter_kw = dict(s=18, color=POINT_COLOR, edgecolor='black', linewidth=0.4,
@@ -456,8 +441,6 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
         w = WIDTHS_IN[width]
         fig, ax = plt.subplots(figsize=(w, 0.7 * w))
         ax.scatter(x, y, **scatter_kw)
-        if fit:
-            _draw_fit(ax, x, *fit)
         ax.set_xlabel(X_LABEL, fontsize=26)
         ax.set_ylabel(Y_LABEL, fontsize=26)
         ax.tick_params(labelsize=22, length=5, width=0.9)
@@ -483,8 +466,6 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
             ax.set_ylim(ylim)
             ins = ax.inset_axes(inset_bounds)
             ins.scatter(x, y, **scatter_kw)
-            if fit:
-                _draw_fit(ins, x, *fit)
             ins.set_xlim(x0, x1)
             ins.set_ylim(y0, y1)
             ins.tick_params(labelsize=16, length=3.5)
