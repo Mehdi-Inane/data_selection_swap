@@ -21,7 +21,8 @@ def main():
     budget = int(args.fraction * n_train)
 
     paths = common.get_save_paths(
-        'random', args.dataset, cfg['architecture'], budget, args.seed)
+        'random', args.dataset, cfg['architecture'], budget, args.seed,
+        variant=common.storage_variant(args.retrain_optimizer))
     logger = common.get_logger(__name__, paths['log'])
     logger.info(f"Dataset={args.dataset}  budget={budget}  seed={args.seed}  device={device}")
 

@@ -199,6 +199,51 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             self.assertIn(r"VGG-16 & 1 & -- & -- \\", text)
             self.assertIn(r"\end{table}", text)
 
+    def test_jl_ablation_keeps_exact_and_sketched_runs(self):
+        from data_selection_swap.analysis import jl_ablation
+
+        budget = 4500
+        with tempfile.TemporaryDirectory() as scratch:
+            for seed, exact, sketched in ((42, 80.0, 70.0), (43, 90.0, 70.0)):
+                directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
+                             / str(budget) / f"seed_{seed}")
+                directory.mkdir(parents=True)
+                exact_name = f"kl_faithful_full_resnet18_sgd_{budget}_K1"
+                (directory / f"{exact_name}_metrics.json").write_text(
+                    json.dumps({"50": exact, "100": exact}), encoding="utf-8")
+                sketched_name = f"kl_faithful_full_resnet18_sgd_jl1024_{budget}_K1"
+                (directory / f"{sketched_name}_metrics.json").write_text(
+                    json.dumps({"50": sketched, "100": sketched}), encoding="utf-8")
+                dropped = f"kl_faithful_full_resnet18_sgd_jl1024_{budget}_K10"
+                (directory / f"{dropped}_metrics.json").write_text(
+                    json.dumps({"50": 10.0, "100": 10.0}), encoding="utf-8")
+
+            rows = jl_ablation.collect_ablation_rows(
+                scratch, "cifar10", "resnet18", [0.1], [42, 43], [1, 4], [0, 1024])
+            self.assertEqual(
+                sorted((row["k"], row["proj_dim"], row["seed"]) for row in rows),
+                [(1, 0, 42), (1, 0, 43), (1, 1024, 42), (1, 1024, 43)])
+            series = jl_ablation.jl_accuracy_series(result_plots.with_accuracy(rows))
+            self.assertEqual([item["label"] for item in series],
+                             ["K=1, p=0", "K=1, p=1024"])
+            by_label = {item["label"]: item["points"][0][1] for item in series}
+            self.assertAlmostEqual(by_label["K=1, p=0"], 85.0)
+            self.assertAlmostEqual(by_label["K=1, p=1024"], 70.0)
+            self.assertTrue(jl_ablation.emphasizes_exact("K=1, p=0"))
+            self.assertFalse(jl_ablation.emphasizes_exact("K=1, p=1024"))
+
+            path = Path(scratch) / "cifar10_jl_accuracy.tex"
+            jl_ablation.write_jl_latex(
+                str(path), scratch, "cifar10", ["resnet18"],
+                [0.1], [42, 43], [1, 4], [0, 1024])
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(r"\multicolumn{2}{c}{10\%}", text)
+            self.assertIn(r"Architecture & $K$ & $p$", text)
+            self.assertIn(r"ResNet-18 & 1 & 0 & 85.00 $\pm$ 7.07 & 50.00 \\", text)
+            self.assertIn(r"ResNet-18 & 1 & 1024 & 70.00 $\pm$ 0.00 & 0.00 \\", text)
+            self.assertIn(r"ResNet-18 & 4 & 0 & -- & -- \\", text)
+            self.assertIn(r"ResNet-18 & 4 & 1024 & -- & -- \\", text)
+
 
 if __name__ == "__main__":
     unittest.main()

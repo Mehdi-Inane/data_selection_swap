@@ -46,6 +46,7 @@ import sys
 
 import numpy as np
 
+from ..paths import tree
 from .comparison import (N_TRAIN, discover_methods, discover_runs,
                          indices_path_for, load_json, mean_std, run_dir)
 
@@ -71,9 +72,11 @@ def series_label(method, k):
     return f"{method}, K={k}"
 
 
-def collect_runs(scratch, dataset, architecture, fractions, seeds, methods=None):
+def collect_runs(scratch, dataset, architecture, fractions, seeds, methods=None,
+                 variant=''):
     """One row per saved run that discovery can see. Missing methods contribute nothing."""
-    methods = methods or discover_methods(scratch, dataset, architecture)
+    methods = methods or discover_methods(
+        scratch, dataset, architecture, variant=variant)
     rows = []
     n_train = N_TRAIN[dataset]
     for fraction in fractions:
@@ -81,7 +84,8 @@ def collect_runs(scratch, dataset, architecture, fractions, seeds, methods=None)
         for method in methods:
             for seed in seeds:
                 directory = run_dir(
-                    scratch, method, dataset, architecture, budget, seed)
+                    scratch, method, dataset, architecture, budget, seed,
+                    variant=variant)
                 for k, metrics_path, timing_path in discover_runs(
                         directory, method, budget):
                     metrics = load_json(metrics_path)
@@ -590,8 +594,8 @@ def score_missing(rows, args, scoring, cache_path, logger):
         architecture=args.architecture)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     template = args.checkpoint_dir or os.path.join(
-        args.scratch, 'data_selection_swap', args.dataset,
-        cfg['architecture'], 'checkpoints')
+        tree(args.scratch, 'data_selection_swap', args.variant),
+        args.dataset, cfg['architecture'], 'checkpoints')
     by_seed = {}
     for row in missing:
         by_seed.setdefault(row['seed'], []).append(row)
@@ -664,8 +668,11 @@ def main(argv=None):
     p.add_argument('--methods', default=None, nargs='+',
                    help='Default: every KL variant and baseline found on disk.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "and writes the adam/ subfolders.")
     p.add_argument('--out_dir', default=None,
-                   help='Default: $SCRATCH/data_selection_baselines/plots')
+                   help='Default: $SCRATCH/data_selection_baselines[/adam]/plots')
 
     p.add_argument('--data_dir', default=None,
                    help='Dataset root. Required the first time exact D is scored. '
@@ -682,9 +689,9 @@ def main(argv=None):
     p.add_argument('--checkpoint_selection', default='spread', choices=['spread', 'prefix'])
     p.add_argument('--checkpoint_weighting', default='point', choices=['point', 'window'])
     p.add_argument('--checkpoint_epochs', default=None, type=int, nargs='+')
-    p.add_argument('--weighting', '--optimizer', dest='weighting', default='sgd',
+    p.add_argument('--weighting', '--optimizer', dest='weighting', default=None,
                    choices=['uniform', 'sgd', 'adam', 'adam_update'],
-                   help='Step weights w_k. Default sgd matches the KL launcher. '
+                   help='Step weights w_k. Default sgd, or adam when --variant adam. '
                         'M = I unless --metric adam (or an Adam weighting) says otherwise.')
     p.add_argument('--metric', default='auto', choices=['auto', 'none', 'adam'])
     p.add_argument('--momentum_response', default='persistent',
@@ -707,8 +714,10 @@ def main(argv=None):
                         handlers=[logging.StreamHandler(sys.stdout)])
     logger = logging.getLogger('result_plots')
 
+    if args.weighting is None:
+        args.weighting = 'adam' if args.variant == 'adam' else 'sgd'
     out_dir = args.out_dir or os.path.join(
-        args.scratch, 'data_selection_baselines', 'plots')
+        tree(args.scratch, 'data_selection_baselines', args.variant), 'plots')
     cache_path = args.cache_csv or os.path.join(
         out_dir, f"d_exact_{args.dataset}_{args.architecture}.csv")
     if args.gbar_cache_dir is None:
@@ -721,7 +730,7 @@ def main(argv=None):
 
     rows = collect_runs(
         args.scratch, args.dataset, args.architecture, args.fractions,
-        args.seeds, args.methods)
+        args.seeds, args.methods, variant=args.variant)
     if not rows:
         logger.error(f"No runs found under {args.scratch} for "
                      f"{args.dataset}/{args.architecture}.")

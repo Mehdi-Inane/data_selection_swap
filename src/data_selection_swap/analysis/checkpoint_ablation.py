@@ -18,6 +18,7 @@ Usage:
 import argparse
 import os
 
+from ..paths import normalize_variant, tree
 from .comparison import N_TRAIN, mean_std
 from .result_plots import (
     emphasizes_k1, k_accuracy_series, plot_accuracy_vs_fraction, with_accuracy,
@@ -33,28 +34,30 @@ ARCHITECTURE_NAMES = {
 }
 
 
-def full_method(architecture):
-    """Filename prefix written by ``selection.kl_full`` with the SGD objective."""
-    return f"kl_faithful_full_{architecture}_sgd"
+def full_method(architecture, variant='sgd'):
+    """Filename prefix written by ``selection.kl_full`` for this optimizer."""
+    suffix = 'adam' if normalize_variant(variant) == 'adam' else 'sgd'
+    return f"kl_faithful_full_{architecture}_{suffix}"
 
 
-def methods_for(architecture, methods):
+def methods_for(architecture, methods, variant='sgd'):
     if methods:
         return list(methods)
-    return [full_method(architecture)]
+    return [full_method(architecture, variant)]
 
 
 def collect_ablation_rows(scratch, dataset, architecture, fractions, seeds,
-                          checkpoints, methods=None):
+                          checkpoints, methods=None, variant=''):
     """Per-run rows restricted to the requested checkpoint counts."""
     methods = list(methods) if methods else [METHOD]
     wanted = set(int(k) for k in checkpoints)
-    rows = collect_runs(scratch, dataset, architecture, fractions, seeds, methods)
+    rows = collect_runs(scratch, dataset, architecture, fractions, seeds, methods,
+                        variant=variant)
     return [row for row in rows if row.get('k') in wanted]
 
 
 def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
-                  checkpoints, methods=None):
+                  checkpoints, methods=None, variant=''):
     """Booktabs table: architecture, K, and test accuracy at each fraction.
 
     Each fraction has two cells: mean ± std, and the sample variance over
@@ -65,7 +68,7 @@ def write_k_latex(path, scratch, dataset, architectures, fractions, seeds,
     for architecture in architectures:
         rows = with_accuracy(collect_ablation_rows(
             scratch, dataset, architecture, fractions, seeds, checkpoints,
-            methods=methods_for(architecture, methods)))
+            methods=methods_for(architecture, methods, variant), variant=variant))
         for row in rows:
             key = (architecture, int(row['k']), row['fraction'])
             buckets.setdefault(key, []).append(float(row['accuracy']))
@@ -135,22 +138,27 @@ def main(argv=None):
                    help='Filename prefix before _<budget>_K. '
                         'Default: kl_faithful_full_<architecture>_sgd.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
+                   help="Result tree. 'sgd' is the historical layout; 'adam' reads "
+                        "the adam/ subfolders and the _adam filename prefix.")
     p.add_argument('--out_dir', default=None,
-                   help='Default: $SCRATCH/data_selection_baselines/checkpoint_ablation')
+                   help='Default: $SCRATCH/data_selection_baselines[/adam]/checkpoint_ablation')
     args = p.parse_args(argv)
 
     out_dir = args.out_dir or os.path.join(
-        args.scratch, 'data_selection_baselines', 'checkpoint_ablation')
+        tree(args.scratch, 'data_selection_baselines', args.variant),
+        'checkpoint_ablation')
     tex_path = os.path.join(out_dir, f'{args.dataset}_k_accuracy.tex')
     write_k_latex(
         tex_path, args.scratch, args.dataset, args.architectures, args.fractions,
-        args.seeds, args.checkpoints, args.methods)
+        args.seeds, args.checkpoints, args.methods, variant=args.variant)
     print(f"Saved → {tex_path}")
 
     rows = collect_ablation_rows(
         args.scratch, args.dataset, args.architecture, args.fractions,
         args.seeds, args.checkpoints,
-        methods_for(args.architecture, args.methods))
+        methods_for(args.architecture, args.methods, args.variant),
+        variant=args.variant)
     if not rows:
         print(f"No checkpoint-ablation runs found under {args.scratch} for "
               f"{args.dataset}/{args.architecture}.")

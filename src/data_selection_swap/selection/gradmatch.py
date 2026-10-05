@@ -193,7 +193,8 @@ def main() -> None:
         }
     else:
         paths = common.get_save_paths(
-            'gradmatch', args.dataset, cfg['architecture'], budget, args.seed)
+            'gradmatch', args.dataset, cfg['architecture'], budget, args.seed,
+            variant=common.storage_variant(args.retrain_optimizer))
         base_dir = paths['base_dir']
 
     # ── 2. Logging ────────────────────────────────────────────────────────────

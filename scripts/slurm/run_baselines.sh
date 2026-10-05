@@ -20,6 +20,12 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -f "${SCRIPT_DIR}/stage_dataset.sh" ]; then
 fi
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
+source "${SCRIPT_DIR}/result_layout.sh"
+
+# OPTIMIZER=adam retrains with Adam (lr 0.001 unless LR is set) and writes
+# under the adam/ subfolders. The reference trajectory is the matching tree.
+OPTIMIZER="${OPTIMIZER:-sgd}"
+VARIANT="$(layout_variant "$OPTIMIZER")"
 
 # ── Environment ──────────────────────────────────────────────────────────────
 module load miniconda/3
@@ -36,11 +42,14 @@ read -r -a ARCHITECTURES <<< "$ARCHITECTURE_GRID"
 FRACTIONS=(0.1 0.2 0.4 0.5)
 SEEDS=(42 43 44 45 46)
 BATCH_SIZE=128
-LR=0.01
-RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-sgd}"
+if [ "$VARIANT" = adam ]; then
+    RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-$OPTIMIZER}"
+else
+    RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-sgd}"
+fi
+LR="$(layout_retrain_lr "$RETRAIN_OPTIMIZER")"
 NUM_WORKERS=4
 SCORING_TRANSFORM="${SCORING_TRANSFORM:-test}"   # must match the KL run
-INIT_CKPT_DIR="${INIT_CKPT_DIR-${SCRATCH:-./scratch}/data_selection_swap/init}"
 
 # Canonical (paper-protocol) configuration of each baseline. Override with e.g.
 #   METHODS="herding_grad_trajectory el2n_trajectory moso_trajectory" \
@@ -88,6 +97,11 @@ esac
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
+BASE_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_baselines "$VARIANT")"
+if [ -z "${INIT_CKPT_DIR+x}" ]; then
+    INIT_CKPT_DIR="${SWAP_ROOT}/init"
+fi
 case "$DATASET" in
     cifar10|cifar100) N_FULL=50000 ;;
     mnist)            N_FULL=60000 ;;
@@ -96,7 +110,7 @@ case "$DATASET" in
 esac
 N_TRAIN=$(( N_FULL - N_FULL / 10 ))
 BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
-RESULT_DIR="${SCRATCH_BASE}/data_selection_baselines/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}"
+RESULT_DIR="${BASE_ROOT}/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}"
 RESULT_MODEL="${RESULT_DIR}/${METHOD}_${BUDGET}_model.pth"
 RESULT_METRICS="${RESULT_DIR}/${METHOD}_${BUDGET}_metrics.json"
 if [ -s "$RESULT_MODEL" ] && [ -s "$RESULT_METRICS" ]; then
@@ -104,7 +118,11 @@ if [ -s "$RESULT_MODEL" ] && [ -s "$RESULT_METRICS" ]; then
     exit 0
 fi
 
-CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/${ARCHITECTURE}/checkpoints"
+if [ "$VARIANT" = adam ]; then
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
+else
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
