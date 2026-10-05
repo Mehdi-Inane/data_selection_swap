@@ -26,18 +26,19 @@ Figure
 ──────
 A single scatter with one marker per run (method, K, seed): NO seed averaging,
 no legend, one colour. An inset zooms on the densest zone of the cloud and is
-outlined by a dotted box on the main axes. Pearson and Spearman correlations
-are written in the corner opposite the inset and printed to the terminal.
+outlined by a dotted box on the main axes. A least-squares line is drawn
+through every point. The pooled Pearson correlation is written in the corner
+opposite the inset.
 
 Correlations
 ────────────
-Both are computed on the plotted coordinates (x = sqrt(G/2), y = gap):
-  * Spearman is rank-based, so it is identical for G and sqrt(G/2).
-  * Pearson is NOT invariant to the sqrt, so it is computed on sqrt(G/2).
-Three variants are reported: pooled over every point; within seed (computed
-per seed, then mean ± std over seeds); and pooled after centring x and y inside
-each seed. No p-values are given: runs sharing a seed or a method are not
-independent, so the naive p-values would be overconfident.
+Pearson r is computed on the plotted coordinates (x = sqrt(G/2), y = gap). It
+is NOT invariant to the sqrt. Three variants are printed: pooled over every
+point; within seed (computed per seed, then mean ± std over seeds); and pooled
+after centring x and y inside each seed. The same three are printed again
+after dropping EL2N, which sits off the cloud; that exclusion is terminal-only
+and is not written on the figure. No p-values are given: runs sharing a seed
+or a method are not independent, so the naive p-values would be overconfident.
 
 Usage:
     python scripts/plot/d_accuracy_scatter.py \\
@@ -55,7 +56,7 @@ import os
 import sys
 
 import numpy as np
-from scipy.stats import rankdata, spearmanr
+from scipy.stats import rankdata
 
 from ..paths import tree
 from .comparison import RANDOM_METHOD
@@ -278,16 +279,6 @@ def _pearson(a, b):
     return float(r) if np.isfinite(r) else float('nan')
 
 
-def _spearman(a, b):
-    """Spearman rho, or NaN where it is undefined rather than merely small."""
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    if _degenerate(a, b):
-        return float('nan')
-    rho = spearmanr(a, b).statistic
-    return float(rho) if np.isfinite(rho) else float('nan')
-
-
 def _mean_std(values):
     values = [v for v in values if np.isfinite(v)]
     if not values:
@@ -297,8 +288,13 @@ def _mean_std(values):
             len(values))
 
 
+def without_el2n(points):
+    """Drop EL2N runs. They are the outliers of this scatter."""
+    return [row for row in points if row.get('method') != 'el2n']
+
+
 def correlation(points, min_group=3):
-    """Pearson and Spearman of x = sqrt(G/2) against y = risk gap.
+    """Pearson r of x = sqrt(G/2) against y = risk gap.
 
     ``pooled``: all points together. ``within``: per seed, then mean ± std over
     seeds. ``centred``: pooled after subtracting each seed's mean of x and y.
@@ -307,26 +303,35 @@ def correlation(points, min_group=3):
     y = np.array([r['y'] for r in points], dtype=np.float64)
     seeds = np.array([str(r['seed']) for r in points])
 
-    within_p, within_s, cx, cy = [], [], [], []
+    within_p, cx, cy = [], [], []
     for seed in sorted(set(seeds)):
         m = seeds == seed
         if m.sum() < min_group:
             continue
         within_p.append(_pearson(x[m], y[m]))
-        within_s.append(_spearman(x[m], y[m]))
         cx.extend(x[m] - x[m].mean())
         cy.extend(y[m] - y[m].mean())
 
     wp_mean, wp_std, wp_n = _mean_std(within_p)
-    ws_mean, ws_std, ws_n = _mean_std(within_s)
     return dict(
         n=len(points),
-        pearson=_pearson(x, y), spearman=_spearman(x, y),
+        pearson=_pearson(x, y),
         within_pearson=wp_mean, within_pearson_std=wp_std, within_pearson_n=wp_n,
-        within_spearman=ws_mean, within_spearman_std=ws_std, within_spearman_n=ws_n,
-        centred_pearson=_pearson(cx, cy), centred_spearman=_spearman(cx, cy),
+        centred_pearson=_pearson(np.asarray(cx), np.asarray(cy)),
         n_centred=len(cx),
     )
+
+
+def line_of_best_fit(x, y):
+    """Ordinary least-squares slope and intercept, or None if x does not vary."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.size < 2 or np.ptp(x) == 0.0:
+        return None
+    slope, intercept = np.polyfit(x, y, 1)
+    if not (np.isfinite(slope) and np.isfinite(intercept)):
+        return None
+    return float(slope), float(intercept)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,9 +355,9 @@ RC = {
     'ps.fonttype': 42,
 }
 
-X_LABEL = r'$\sqrt{G_T(I)/2}$'
-Y_LABEL = (r'$R_P\left(\mathcal{A}(S_{\widehat{I}})\right)'
-           r' - R_P\left(\mathcal{A}(S)\right)$')
+X_LABEL = r'$\sqrt{\widehat{G}_T(I)/2}$'
+Y_LABEL = (r'$\widehat{R}_P\left(\mathcal{A}(S_{\widehat{I}})\right)'
+           r' - \widehat{R}_P\left(\mathcal{A}(S)\right)$')
 
 # Inset bounds in axes coordinates (x0, y0, w, h) and the corner of the
 # correlation text (x, y, ha, va), placed opposite the inset. The bound y <= x
@@ -400,10 +405,17 @@ def densest_box(x, y, frac=0.6, radius=0.15, pad=0.08):
     return box
 
 
+def _draw_fit(ax, x, slope, intercept):
+    """OLS line sampled in data units, so it stays linear when x is logarithmic."""
+    xs = np.linspace(float(np.min(x)), float(np.max(x)), 200)
+    ax.plot(xs, intercept + slope * xs, color='black', lw=1.15, zorder=2,
+            solid_capstyle='round')
+
+
 def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=True,
                xscale='log', zoom_frac=0.6, zoom_box=None, inset_loc='upper_left',
                corr_text=True, include_random=True):
-    """One scatter of every run, with a zoom inset and the correlations in a corner.
+    """One scatter of every run, with a zoom inset and the pooled Pearson r.
 
     Returns the correlation stats, or None if nothing could be drawn.
     """
@@ -424,6 +436,17 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
     x = np.array([r['x'] for r in points], dtype=np.float64)
     y = np.array([r['y'] for r in points], dtype=np.float64)
     stats = correlation(points)
+    robust = correlation(without_el2n(points))
+    stats.update(
+        n_no_el2n=robust['n'],
+        pearson_no_el2n=robust['pearson'],
+        within_pearson_no_el2n=robust['within_pearson'],
+        within_pearson_no_el2n_std=robust['within_pearson_std'],
+        within_pearson_no_el2n_n=robust['within_pearson_n'],
+        centred_pearson_no_el2n=robust['centred_pearson'],
+        n_centred_no_el2n=robust['n_centred'],
+    )
+    fit = line_of_best_fit(x, y)
     box = tuple(zoom_box) if zoom_box else densest_box(x, y, zoom_frac)
     inset_bounds, (tx, ty, tha, tva) = INSET_LAYOUT[inset_loc]
     scatter_kw = dict(s=18, color=POINT_COLOR, edgecolor='black', linewidth=0.4,
@@ -433,6 +456,8 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
         w = WIDTHS_IN[width]
         fig, ax = plt.subplots(figsize=(w, 0.7 * w))
         ax.scatter(x, y, **scatter_kw)
+        if fit:
+            _draw_fit(ax, x, *fit)
         ax.set_xlabel(X_LABEL, fontsize=26)
         ax.set_ylabel(Y_LABEL, fontsize=26)
         ax.tick_params(labelsize=22, length=5, width=0.9)
@@ -458,6 +483,8 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
             ax.set_ylim(ylim)
             ins = ax.inset_axes(inset_bounds)
             ins.scatter(x, y, **scatter_kw)
+            if fit:
+                _draw_fit(ins, x, *fit)
             ins.set_xlim(x0, x1)
             ins.set_ylim(y0, y1)
             ins.tick_params(labelsize=16, length=3.5)
@@ -467,8 +494,7 @@ def plot_panel(panel_rows, out_stem, width='double', formats=('pdf',), title=Tru
 
         if corr_text:
             ax.text(tx, ty,
-                    f"Pearson $r$ = {stats['pearson']:+.2f}\n"
-                    f"Spearman $\\rho$ = {stats['spearman']:+.2f}",
+                    f"Pearson $r$ = {stats['pearson']:+.2f}",
                     transform=ax.transAxes, ha=tha, va=tva, fontsize=20, zorder=6,
                     bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='0.6',
                               lw=0.5, alpha=0.9))
@@ -505,18 +531,21 @@ def plot_all(rows, out_dir, logger=None, **kwargs):
         logger.info(
             f"\n=== {dataset} / {architecture}, fraction {fraction:g} "
             f"({len(points)} points, one per run) -> {out_stem}\n"
-            f"Correlation of x = sqrt(G/2) with y = |full - subset| gap "
+            f"Pearson r of x = sqrt(G/2) with y = |full - subset| gap "
             f"(positive = lower G goes with a smaller gap)\n"
-            f"  pooled        : Pearson {stats['pearson']:+.3f} | "
-            f"Spearman {stats['spearman']:+.3f}\n"
-            f"  within seed   : Pearson {stats['within_pearson']:+.3f} ± "
-            f"{stats['within_pearson_std']:.3f} | Spearman "
-            f"{stats['within_spearman']:+.3f} ± {stats['within_spearman_std']:.3f} "
+            f"  pooled        : {stats['pearson']:+.3f}\n"
+            f"  within seed   : {stats['within_pearson']:+.3f} ± "
+            f"{stats['within_pearson_std']:.3f} "
             f"(over {stats['within_pearson_n']} seeds)\n"
-            f"  seed-centred  : Pearson {stats['centred_pearson']:+.3f} | "
-            f"Spearman {stats['centred_spearman']:+.3f} "
+            f"  seed-centred  : {stats['centred_pearson']:+.3f} "
             f"({stats['n_centred']} points)\n"
-            f"  (Spearman is identical for G and sqrt(G/2); Pearson is on sqrt(G/2).)")
+            f"  excluding EL2N ({stats['n_no_el2n']} of {stats['n']} points):\n"
+            f"    pooled       : {stats['pearson_no_el2n']:+.3f}\n"
+            f"    within seed  : {stats['within_pearson_no_el2n']:+.3f} ± "
+            f"{stats['within_pearson_no_el2n_std']:.3f} "
+            f"(over {stats['within_pearson_no_el2n_n']} seeds)\n"
+            f"    seed-centred : {stats['centred_pearson_no_el2n']:+.3f} "
+            f"({stats['n_centred_no_el2n']} points)")
         violations = [r for r in points if r['y'] > r['x'] + 1e-12]
         logger.info(f"Bound y <= sqrt(G/2) (accuracy as a fraction, b-a=1): "
                     f"violated by {len(violations)} of {len(points)} points")
