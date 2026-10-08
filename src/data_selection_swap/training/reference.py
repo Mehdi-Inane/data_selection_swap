@@ -35,7 +35,7 @@ do.
 
 Usage:
     python scripts/train/reference.py --dataset cifar100 --data_dir ... \\
-        --save_dir $SCRATCH/data_selection_swap/adam/cifar100/resnet18/checkpoints/seed_42 \\
+        --save_dir results/data_selection_swap/adam/cifar100/resnet18/checkpoints/seed_42 \\
         --optimizer adam --lr 1e-3 --checkpoint_schedule full_data
 """
 

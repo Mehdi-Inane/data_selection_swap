@@ -1,443 +1,340 @@
 # Faithful data selection
 
-This repository implements the trajectory-based data-selection framework in
-[the manuscript](docs/data_selection_manuscript.pdf). It selects a fixed-size
-training subset whose gradients reproduce the full-data gradients along a saved
-training trajectory, then evaluates the subset by retraining a fresh model.
+This repository reproduces the experiments in
+[Towards Faithful Data Selection](docs/data_selection_manuscript.pdf).
+Gradient Swap selects a fixed-size training subset whose gradients stay close
+to the full-data gradients along a saved training trajectory. The subset is
+then evaluated by retraining a fresh model.
 
-The reconciled baseline/KL grid supports CIFAR-10 and CIFAR-100 with torchvision
-ResNet-18, VGG-16-BN, and GoogLeNet/Inception architectures. The mh-only
-MNIST/ImageNet, ResNet-34, LeNet, and ConvNet paths remain available for
-controlled experiments but are not part of that canonical comparison grid. It includes a factored
-last-layer method, a matrix-free full-network method, and Random, Herding,
-Moderate Coreset, EL2N, MoSo, GraphCut, Facility Location, and GradMatch
-baselines. Controlled experiment drivers use seed-matched trajectories, clean
-scoring views, frozen subset indices, shared retraining initializations, and
-immutable configuration-hashed artifacts. The common protocol is described in
-[the experimental protocol](docs/experimental_protocol.md).
+The published comparison uses CIFAR-10 and CIFAR-100 with ResNet-18, VGG-16,
+and Inception. The selector in those runs is full-network Gradient Swap
+(`scripts/select/kl_full.py`). Random, Herding, Moderate Coreset, EL2N, MoSo,
+GraphCut, and Facility Location are the static baselines.
 
-The selector is an empirical gradient-discrepancy method for ordinary
-SGD/Adam trajectories. It is not the manuscript's full-batch Langevin process,
-so its reported certificate applies to the implemented quadratic objective,
-not automatically to the manuscript's end-to-end KL theorem. ResNet/VGG/Inception
-scores use frozen BatchNorm statistics and are explicitly labeled as a
-surrogate; BN-free LeNet cells remain the primary exact per-example controls.
+## Install
 
-## Optimizer-aware scoring: SGD and Adam
-
-**The SGD and Adam scores requested for this project are implemented directly.**
-At checkpoint `k`, define the difference between the selected-subset and full-data
-mean gradients as
-
-```text
-Delta g_k(I) = mean_{i in I} grad l(theta_k, z_i)
-               - mean_{i in S} grad l(theta_k, z_i).
-```
-
-The available objectives are:
-
-| Mode | Objective | Equivalent gradient-feature scaling |
-|---|---|---|
-| `uniform` | `sum_k ||Delta g_k(I)||^2` | `1` |
-| `sgd` | `sum_k eta_k ||Delta g_k(I)||^2` | `sqrt(eta_k)` |
-| `adam` | `sum_k eta_k ||Delta g_k(I) / (sqrt(vhat_k) + eps)||^2` | `sqrt(eta_k) / (sqrt(vhat_k) + eps)` per coordinate |
-| `adam_update` | `sum_k eta_k^2 ||Delta g_k(I) / (sqrt(vhat_k) + eps)||^2` | update-mismatch ablation, not the manuscript KL score |
-
-`scripts/train/full_data.py` keeps its checkpoints as ordinary model state dicts
-and writes `trajectory.json`, including the learning rate `eta_k`, step, and epoch
-for every saved SGD checkpoint. `scripts/train/reference.py --optimizer adam`
-additionally saves Adam's second-moment accumulator and optimizer step. The scorer
-bias-corrects it to obtain `vhat_k` before constructing the coordinatewise metric.
-
-The implementation does not need to materialize the scaled per-example gradients.
-It applies the mathematically equivalent checkpoint weight `w_k = eta_k` and Adam
-metric
-
-```text
-M_k[j] = 1 / (sqrt(vhat_k[j]) + eps)^2
-```
-
-inside the same matrix-free kernel-vector product and swap algorithm. Positive
-checkpoint weights are normalized to sum to one; this changes the reported scale
-but not the selected subset or any swap decision.
-
-Use these flags to choose the score:
-
-```text
---optimizer uniform                         unweighted reference
---optimizer sgd  --metric none              SGD score D_eta
---optimizer adam --metric adam              Adam score D_Adam
---checkpoint_weighting point                use eta_k exactly (default)
---checkpoint_weighting window               optional sum of eta over each checkpoint window
-```
-
-For Adam, `--metric auto` is equivalent to `--metric adam`. Adam's coordinatewise
-metric is incompatible with the independent factor projections used by
-`--proj_dim`, so Adam runs require `--proj_dim 0`.
-
-## Repository layout
-
-```text
-src/data_selection_swap/
-  common.py                 datasets, models, retraining, timing, and artifacts
-  trajectory.py             eta_k weights, Adam vhat metric, checkpoint resolution
-  objective.py              exact full-network D(alpha) evaluation
-  selection/
-    kl.py                    factored last-layer KL-Faithful selector
-    kl_full.py               matrix-free all-parameter selector
-    *.py                     maintained baseline implementations
-  training/                 full-data and optimizer-aware trajectory training
-  analysis/                 discovery, aggregation, scoring, and plotting logic
-scripts/
-  train/                    training entry points
-  select/                   selection entry points
-  analyze/                  aggregation and objective-scoring entry points
-  plot/                     plotting entry points
-  slurm/                    cluster launchers and dataset staging
-  legacy/                   superseded prototypes with hard-coded assumptions
-docs/                       manuscript and experimental protocol
-notebooks/                  exploratory notebooks
-```
-
-The reusable implementation lives under `src/`; files under `scripts/` are thin,
-human-facing entry points.
-
-## Installation
-
-Python 3.10 or newer is recommended. Create or activate an environment, then run:
+Python 3.10 or newer is recommended (3.9 is the minimum). From the repository
+root:
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-The code imports CORDS 0.0.4 for `ResNet18` and GradMatch. The editable install
-is important: it makes
-every script import the package from `src/data_selection_swap` consistently.
+A CUDA build of PyTorch is required for the full experiments. CPU is enough
+for the unit tests and for inspecting saved results.
 
-Dataset roots should have these layouts:
+GraphCut and Facility Location need `apricot-select`, which is in
+`requirements.txt`. GradMatch is not part of the manuscript and needs a
+separate [CORDS](https://github.com/decile-team/cords) install. Files under
+`scripts/legacy/` are old prototypes and are not used below.
+
+## Data and results
+
+CIFAR-10 and CIFAR-100 are downloaded by passing `--download`. Point
+`--data_dir` at the directory you want them stored in:
 
 ```text
-/path/to/cifar10/                 torchvision CIFAR-10 root
-/path/to/cifar100/                torchvision CIFAR-100 root
-/path/to/mnist/                   torchvision MNIST root
-/path/to/imagenet/train/<class>/  ImageNet training images
-/path/to/imagenet/val/<class>/    ImageNet validation images
+data/cifar10/
+data/cifar100/
 ```
 
-Pass `--download` for CIFAR-10, CIFAR-100, or MNIST if it is not already
-present. ImageNet must be staged manually or through
-`scripts/slurm/stage_dataset.sh`.
+Every run writes under a results root. The root is `RESULTS_ROOT` if that
+variable is set, otherwise `SCRATCH`, otherwise `./results` in the current
+working directory.
 
-## Controlled experiment suites
-
-The requested experiments have dedicated drivers and example configurations:
-
-- SGD versus Adam, reference/retraining learning-rate grids, and uniform versus
-  learning-rate-aware scoring: `scripts/experiments/optimizer_lr.py` with
-  `optimizer_lr.example.json`.
-- Manuscript Algorithm 2 versus Algorithm 3 with the same trajectory, initial
-  subset, and retraining initialization: `compare_swap_rules.py` with
-  `swap_rules.example.json`. The validator requires `max_pairs=0`, so the
-  Algorithm 2 pair search cannot silently become a truncated approximation.
-- Correlation between all-parameter `D(alpha)` and final test accuracy on
-  CIFAR-10/CIFAR-100/MNIST and multiple networks:
-  `run_d_accuracy_correlation.py`, followed by
-  `scripts/analyze/analyze_d_correlation.py`.
-
-See [the optimizer/swap experiment guide](scripts/experiments/README.md) and
-[the D(alpha) correlation guide](scripts/experiments/README_D_CORRELATION.md)
-for local inspection, Slurm submission, output schemas, and statistical
-analysis. Start by validating the supplied plans:
-
-```bash
-python scripts/experiments/optimizer_lr.py validate \
-  --config scripts/experiments/optimizer_lr.example.json
-python scripts/experiments/compare_swap_rules.py validate \
-  --config scripts/experiments/swap_rules.example.json
+```text
+results/data_selection_swap/<dataset>/<architecture>/checkpoints/seed_42/
+results/gradmatch_swap/<dataset>/<architecture>/<budget>/seed_<seed>/
+results/data_selection_baselines/<method>/<dataset>/<architecture>/<budget>/seed_<seed>/
 ```
 
-## Run an SGD experiment
+`<budget>` is `int(fraction * 45000)` on CIFAR, because selection uses the
+90% training pool. Pass `--scratch /path/to/results` to analysis scripts when
+the results root is not the one above.
 
-### 1. Train the shared full-data trajectory
+On a cluster, export `RESULTS_ROOT` before `sbatch`. Set `CONDA_MODULE` and
+`CONDA_ENV` only if the job should load a module and activate a conda
+environment. Otherwise the job uses the Python already on `PATH`. Optional
+dataset archives are `CIFAR10_ARCHIVE`, `CIFAR100_ARCHIVE`, and
+`IMAGENET_RAW_DIR` (ImageNet is not used in the manuscript).
+
+## Protocol used in the paper
+
+Section 5 and Appendix G of the manuscript:
+
+| | |
+|---|---|
+| Data | CIFAR-10 and CIFAR-100, 90/10 train/validation split |
+| Models | ResNet-18, VGG-16, Inception |
+| Training | SGD, Nesterov momentum 0.9, learning rate 0.01, weight decay `5e-4`, cosine schedule, 300 epochs, batch size 128, cross-entropy |
+| Budgets | 10%, 20%, 40%, and 50% of the training pool |
+| Seeds | 42, 43, 44, 45, 46 |
+| Scoring view | clean test images (`--scoring_transform test`) |
+| Gradient Swap | full network, at most 200 swaps, SGD checkpoint weights `w_k = eta_k` |
+
+Appendix G.1 trains **one** reference trajectory, on seed 42, and reuses it
+for every selection seed. The other four seeds therefore score a pool that is
+not identical to the reference pool. Reproduce that by pointing
+`--checkpoint_dir` at `checkpoints/seed_42` and passing
+`--allow_manifest_mismatch`. Leaving the flag off keeps the stricter check:
+the trajectory seed and pool must match the selection seed.
+
+The same optimizer and schedule are used to train the reference model and to
+retrain on a selected subset. These grids take hundreds of GPU-days. The
+smoke test below checks that a single command runs.
+
+## Smoke test
+
+One epoch, one seed, selection only (no 300-epoch retrain):
 
 ```bash
 python scripts/train/full_data.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --save_dir /path/to/sgd_checkpoints \
-  --lr 0.01 \
-  --batch_size 128 \
-  --seed 42
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --data_dir data/cifar10 \
+  --save_dir results/data_selection_swap/cifar10/resnet18/checkpoints/seed_42 \
+  --num_epochs 1 \
+  --seed 42 \
+  --download
+
+python scripts/select/kl_full.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --data_dir data/cifar10 \
+  --checkpoint_dir results/data_selection_swap/cifar10/resnet18/checkpoints/seed_42 \
+  --fraction 0.1 \
+  --num_checkpoints 1 \
+  --optimizer sgd \
+  --metric none \
+  --max_iters 2 \
+  --seed 42 \
+  --selection_only
 ```
 
-This writes model checkpoints, `trajectory.json` with each checkpoint's `eta_k`,
-`train_time.json`, and `train.log`.
+The published runs use 300 epochs and `--max_iters 200`. Drop
+`--num_epochs` and `--selection_only` for that.
 
-### 2. Select with the learning-rate-weighted SGD score
+## 1. Reference trajectory
+
+Train the seed-42 full-data model and store a checkpoint at the end of every
+epoch, with the learning rate of that epoch. One job per dataset and
+architecture (6 jobs):
 
 ```bash
-python scripts/select/kl.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/sgd_checkpoints \
+SEEDS_OVERRIDE=42 sbatch --array=0-5 scripts/slurm/run_full_data.sh
+```
+
+Locally, repeat the smoke-test training command without `--num_epochs`, once
+per dataset and architecture. The save directory must stay
+`.../checkpoints/seed_42`. Later stages read that directory.
+
+## 2. Main comparison (Figure 2)
+
+Full-network Gradient Swap at **K = 1** (the epoch-1 checkpoint), plus the
+seven baselines, at every fraction and seed.
+
+One Gradient Swap cell:
+
+```bash
+python scripts/select/kl_full.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --data_dir data/cifar10 \
+  --checkpoint_dir results/data_selection_swap/cifar10/resnet18/checkpoints/seed_42 \
   --fraction 0.1 \
-  --num_checkpoints 10 \
+  --num_checkpoints 1 \
   --checkpoint_selection spread \
   --checkpoint_weighting point \
   --optimizer sgd \
   --metric none \
-  --rule ranked \
-  --seed 42
+  --max_iters 200 \
+  --seed 43 \
+  --allow_manifest_mismatch \
+  --download
 ```
 
-Use `--rule best` for exact best-swap search in the factored last-layer kernel.
-It is certifying but can be much more expensive. Use `--selection_only` to save
-indices and timing without the final retraining stage.
+Seed 42 does not need `--allow_manifest_mismatch`. Seeds 43–46 do.
 
-## Run an Adam experiment
-
-### 1. Train an optimizer-aware Adam reference trajectory
+The full grid is 2 datasets × 3 architectures × 4 fractions × 5 seeds:
 
 ```bash
-python scripts/train/reference.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --save_dir /path/to/adam_checkpoints \
-  --optimizer adam \
-  --lr 0.001 \
-  --num_checkpoints 10 \
-  --spacing linear \
-  --seed 42
+sbatch scripts/slurm/run_kl_full_selection.sh
+sbatch scripts/slurm/run_baselines.sh
 ```
 
-Each checkpoint record contains the model weights, step, learning rate, Adam
-hyperparameters, and second-moment state needed to reconstruct `vhat_k`.
-
-### 2. Select with the Adam-preconditioned score
+`run_kl_full_selection.sh` defaults to `NUM_CHECKPOINTS=1`. Baselines are
+Random, Herding, Moderate, EL2N, MoSo, GraphCut, and Facility Location.
+Accuracy curves are:
 
 ```bash
-python scripts/select/kl.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/adam_checkpoints \
-  --fraction 0.1 \
-  --num_checkpoints 10 \
+python scripts/plot/result_plots.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --scratch results
+```
+
+Repeat `--dataset` and `--architecture` for the other five panels. Figures
+land in `results/data_selection_baselines/plots/`.
+
+## 3. Checkpoint count (Table 1 and Appendix J)
+
+Same training setup, with K in {1, 4, 10, 15, 20}. K = 1 is the epoch-1
+checkpoint. Larger K takes checkpoints spaced across the 300 epochs.
+`run_kl_full_selection_checkpoints.sh` is this experiment (600 tasks).
+`run_checkpoint_ablation.sh` is an older last-layer sweep and is not Table 1
+or Appendix J.
+
+```bash
+sbatch scripts/slurm/run_kl_full_selection_checkpoints.sh
+
+python scripts/plot/checkpoint_ablation.py \
+  --dataset cifar10 \
+  --architectures resnet18 vgg16 inception \
+  --checkpoints 1 4 10 15 20 \
+  --scratch results
+```
+
+Run the plot once with `--dataset cifar100` for Appendix J's second table.
+Table 1 is the CIFAR-10 ResNet-18 rows.
+
+## 4. Faithfulness correlation (Figure 1 and Appendix H)
+
+After the subsets in Section 2 exist, score every saved subset on **all 300**
+reference checkpoints. One point is one method and seed at the 10% budget.
+The reference is again `checkpoints/seed_42`.
+
+```bash
+python scripts/analyze/score_subsets.py \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --data_dir data/cifar10 \
+  --checkpoint_dir results/data_selection_swap/cifar10/resnet18/checkpoints/seed_42 \
+  --fractions 0.1 \
+  --seeds 42 43 44 45 46 \
+  --num_checkpoints 0 \
+  --weighting sgd \
+  --metric none \
   --checkpoint_weighting point \
-  --optimizer adam \
-  --metric adam \
-  --adam_eps 1e-8 \
-  --proj_dim 0 \
-  --retrain_optimizer adam \
-  --seed 42
+  --scoring_transform test \
+  --allow_manifest_mismatch \
+  --scratch results \
+  --download
 ```
 
-To isolate the effect of coordinate scaling from checkpoint weighting, useful
-ablations are:
+`--num_checkpoints 0` means every stored checkpoint. The table is
+`results/data_selection_baselines/d_exact_cifar10_resnet18_f0.1.csv`.
 
 ```bash
-# Equal checkpoint weights, Adam coordinate metric
-python scripts/select/kl.py ... --optimizer uniform --metric adam
+sbatch scripts/slurm/run_score_subsets.sh
 
-# SGD eta_k weights, no coordinate metric
-python scripts/select/kl.py ... --optimizer sgd --metric none
-
-# Full Adam score
-python scripts/select/kl.py ... --optimizer adam --metric adam
+python scripts/plot/d_accuracy_scatter.py \
+  --input results/data_selection_baselines/d_exact_cifar10_resnet18_f0.1.csv \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --scratch results
 ```
 
-The first and third commands need Adam reference checkpoints because an SGD run
-does not contain second moments.
+The Slurm array is one task per dataset and architecture (6 tasks). Repeat
+the plot command for each CSV. Figure 1 in the main text is ResNet-18 on
+CIFAR-10 and VGG-16 on CIFAR-100. Appendix H is all six panels.
 
-## Full-network selector
+## 5. Warm start (Appendix I)
 
-Use the same trajectory and optimizer flags with the matrix-free all-parameter
-implementation:
+Start Gradient Swap from a baseline subset instead of a random subset.
+The swap uses K = 10 checkpoints. The reported objective uses all 300
+checkpoints. The grid is CIFAR-10, ResNet-18, 10% of the pool, started from
+GraphCut, Herding, Random, and EL2N, seeds 42–46.
+
+Run Section 2 for that cell first, then:
+
+```bash
+sbatch scripts/slurm/run_kl_full_from_baselines.sh
+sbatch scripts/slurm/run_score_warmstart.sh
+```
+
+The second job writes the before/after table under
+`results/data_selection_baselines/baseline_warmstart/`.
+
+One local warm start, from EL2N, seed 42:
 
 ```bash
 python scripts/select/kl_full.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/adam_checkpoints \
+  --dataset cifar10 \
+  --architecture resnet18 \
+  --data_dir data/cifar10 \
+  --checkpoint_dir results/data_selection_swap/cifar10/resnet18/checkpoints/seed_42 \
   --fraction 0.1 \
-  --optimizer adam \
-  --metric adam \
-  --checkpoint_weighting point \
+  --num_checkpoints 10 \
+  --optimizer sgd \
+  --metric none \
   --max_iters 200 \
-  --seed 42
+  --seed 42 \
+  --init_method el2n \
+  --init_indices results/data_selection_baselines/el2n/cifar10/resnet18/4500/seed_42/el2n_4500_indices.pt \
+  --download
 ```
 
-This is substantially more expensive than the last-layer factorization. Its
-`--max_iters` counts full gradient-ranking sweeps, not cheap scalar iterations.
+## 6. Johnson–Lindenstrauss embeddings (Appendix K)
 
-## Run baselines
-
-Every baseline uses the shared protocol and accepts the common dataset,
-checkpoint, fraction, seed, and `--selection_only` arguments. Examples:
-
-```bash
-python scripts/select/random_selection.py \
-  --dataset cifar100 --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/sgd_checkpoints --fraction 0.1 --seed 42
-
-python scripts/select/herding.py \
-  --dataset cifar100 --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/sgd_checkpoints --fraction 0.1 --kernel features
-
-python scripts/select/submodular.py \
-  --dataset cifar100 --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/sgd_checkpoints --fraction 0.1 \
-  --function graphcut --kernel features
-```
-
-Other entry points are `moderate.py`, `el2n.py`, and `moso.py` under
-`scripts/select/`. (`gradmatch.py` remains for legacy CORDS-based runs and
-requires a separate `cords` install.)
-
-## Aggregate, score, and plot
-
-The scripts use `$SCRATCH` by default. Pass `--scratch` when results live
-elsewhere.
+Count-sketch the full-network gradient to width 1024, 2048, or 4096, and
+compare with the exact aggregate (`p = 0`, which is the K = 1 and K = 4
+runs from Section 3). The manuscript table is CIFAR-10, ResNet-18, fractions
+10–50%, seeds 42–46, K in {1, 4}.
 
 ```bash
-# Accuracy and timing summary
-python scripts/analyze/aggregate_comparison.py \
-  --dataset cifar100 \
-  --scratch /path/to/scratch
+DATASETS=cifar10 ARCHITECTURES=resnet18 \
+  sbatch --array=0-119 scripts/slurm/run_kl_full_jl_ablation.sh
 
-# Re-score every saved subset on one common full-network objective
-python scripts/analyze/score_subsets.py \
-  --dataset cifar100 \
-  --data_dir /path/to/cifar100 \
-  --checkpoint_dir /path/to/sgd_checkpoints \
-  --weighting sgd \
-  --checkpoint_weighting point \
-  --scratch /path/to/scratch
-
-# Checkpoint-count ablation plot
-python scripts/plot/checkpoint_ablation.py \
-  --dataset cifar100 \
-  --scratch /path/to/scratch
-
-# JL-embedding ablation plot (K in {1, 4}; widths 1024, 2048, 4096).
-# p=0 curves are the exact aggregates from the checkpoint-count runs.
 python scripts/plot/jl_ablation.py \
   --dataset cifar10 \
   --architecture resnet18 \
-  --scratch /path/to/scratch
+  --checkpoints 1 4 \
+  --proj_dims 0 1024 2048 4096 \
+  --scratch results
+```
 
-# Baseline warm start: accuracy and all-checkpoint G_T before and after KL
-python scripts/plot/baseline_warmstart.py \
+The default array `0-719` also runs CIFAR-100 and the other two
+architectures. Those extra cells are not in Appendix K.
+
+## 7. Selected examples (Appendix L)
+
+Six training images from each method's 10% subset, seed 42, for every
+dataset and architecture. Indices are mapped back through the seed-42 split
+and shown without crop, flip, or normalization.
+
+```bash
+sbatch scripts/slurm/run_selected_examples.sh
+
+python scripts/plot/selected_examples.py \
   --dataset cifar10 \
   --architecture resnet18 \
   --fraction 0.1 \
-  --scratch /path/to/scratch
-
-# Do the architectures (and the baselines) pick the same examples?
-python scripts/analyze/selection_overlap.py \
-  --dataset cifar10 \
-  --scratch /path/to/scratch
-
-# What does picking different examples cost? (needs a GPU)
-python scripts/analyze/transfer_d.py \
-  --dataset cifar10 \
-  --data_dir /path/to/cifar10 \
-  --scratch /path/to/scratch
+  --seed 42 \
+  --data_dir data/cifar10 \
+  --scratch results \
+  --download
 ```
 
-`selection_overlap.py` reports chance-corrected agreement `kappa` between every
-pair of saved subsets, across architectures, across methods, and across seeds.
-The cross-seed figure is the one to read the others against: it is how
-reproducible selection is at all, so a cross-architecture `kappa` far below it
-means the architecture, not run noise, decides what gets picked. Pass
-`--data_dir` to split agreement into class composition and individual examples,
-and `--scored_input` to rank the baselines against every `kl_faithful*` variant
-on set agreement, `D_rel`, and accuracy at once. Unlike the aggregators it
-discovers runs through their `*_indices.pt`, so `--selection_only` runs count.
-
-`transfer_d.py` then scores each architecture's subset against every
-architecture's trajectory, so the diagonal is the matched case and an
-off-diagonal entry is what the other architecture would have got by importing
-that subset. Its diagonal recomputes what `score_subsets.py` already wrote,
-which makes it a consistency check on the scoring setup.
-
-The aggregator discovers optimizer variants separately (for example,
-`kl_faithful`, `kl_faithful_sgd`, and `kl_faithful_adam`), so their accuracy
-and timing rows can be compared directly. Non-default metric, checkpoint-window,
-and momentum ablations receive additional filename tags and do not overwrite the
-main runs.
-
-Selection runs save these artifacts:
+## What each run writes
 
 ```text
 *_indices.pt      selected pool-relative indices
-*_timing.json     extra training, scoring, and selection wall-clock
-*_objective.json  KL-Faithful objective history
-*_metrics.json    test accuracy during subset retraining
-*_model.pth       final retrained model
+*_timing.json     scoring and selection time
+*_objective.json  Gradient Swap objective history
+*_metrics.json    test accuracy while retraining the subset
+*_model.pth       retrained model
 ```
 
-## Slurm
+`scripts/analyze/aggregate_comparison.py --dataset cifar10 --scratch results`
+prints mean and standard deviation of accuracy and time across seeds.
 
-Slurm runs a spooled copy of each launcher, so the launchers locate the
-repository from the directory `sbatch` was called in (`SLURM_SUBMIT_DIR`) and
-set `PYTHONPATH` automatically. Submit from anywhere inside the repository, or
-export `PROJECT_ROOT=/path/to/data_selection_swap` when submitting elsewhere:
+## Experiments that are not in the manuscript
 
-Launchers activate the **`kl_select`** conda environment by default (`module
-load miniconda/3` on Mila). Override with `CONDA_ENV=other_env sbatch ...` when
-needed. Install dependencies with `pip install -r requirements.txt` inside that
-environment (Python 3.9+, PyTorch 2.0+ for full-network KL).
-
-```bash
-sbatch scripts/slurm/run_full_data.sh
-sbatch scripts/slurm/run_kl_selection.sh
-sbatch scripts/slurm/run_kl_full_selection.sh
-sbatch scripts/slurm/run_baselines.sh
-sbatch scripts/slurm/run_checkpoint_ablation.sh
-sbatch scripts/slurm/run_kl_full_jl_ablation.sh   # K in {1, 4}, widths 1024/2048/4096
-sbatch scripts/slurm/run_kl_full_from_baselines.sh  # CIFAR-10 ResNet-18, 10%, K=10 from four baselines
-sbatch scripts/slurm/run_score_warmstart.sh         # all-checkpoint G_T, table, and slope plot
-sbatch scripts/slurm/run_transfer_d.sh   # one array task per target architecture
-
-# Controlled multi-stage suites (submitters add strict afterok dependencies)
-scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json
-scripts/slurm/submit_swap_rules.sh scripts/experiments/swap_rules.example.json
-STAGE=reference sbatch scripts/slurm/run_d_accuracy_correlation.sh
-```
-
-Environment variables such as `DATASET_OVERRIDE`, `CHECKPOINT_DIR`,
-`NUM_CHECKPOINTS`, `CHECKPOINT_SELECTION`, `CHECKPOINT_WEIGHTING`, `OPTIMIZER`,
-`METRIC`, and `RULE` override the main KL launcher settings. Adjust the dataset
-archives and cluster-specific paths in `scripts/slurm/stage_dataset.sh`.
-
-For example:
-
-```bash
-# SGD score on the ordinary full-data trajectory
-OPTIMIZER=sgd METRIC=none CHECKPOINT_WEIGHTING=point \
-  sbatch scripts/slurm/run_kl_selection.sh
-
-# Adam score on an optimizer-aware trajectory
-CHECKPOINT_DIR=/path/to/adam_checkpoints OPTIMIZER=adam METRIC=adam \
-  CHECKPOINT_WEIGHTING=point sbatch scripts/slurm/run_kl_selection.sh
-```
-
-## Reproducibility notes
-
-- Use the same `--seed` for the 90/10 split, selection, and retraining.
-- New trajectory manifests store and consumers verify a hash of the ordered
-  pool indices; a seed label alone is not accepted as proof of split identity.
-- Use the same `--scoring_transform` for every method. `test` gives a stable,
-  unaugmented scoring view; `train` reproduces the earlier runs.
-- Prefer `--checkpoint_selection spread`; `prefix` intentionally reproduces the
-  early-checkpoint experiments.
-- Keep `--checkpoint_weighting point` for the exact `eta_k` formulas above. Use
-  `window` only when treating a sparse checkpoint as representative of a range of
-  optimizer steps.
-- The files in `scripts/legacy/` are retained for provenance and are not part of
-  the maintained workflow.
-- Exact Algorithm 2 has quadratic worst-case pair count per iteration and can
-  be substantially slower than Algorithm 3. Use a small smoke configuration
-  before allocating the full grid; any positive `max_pairs` is reported as a
-  truncated, non-certifying search.
+`scripts/experiments/` has three extra drivers: an optimizer and learning-rate
+factorial, a comparison of the two swap rules, and a controlled correlation
+between `D(alpha)` and accuracy on networks without BatchNorm. They are
+documented in [scripts/experiments/README.md](scripts/experiments/README.md)
+and [scripts/experiments/README_D_CORRELATION.md](scripts/experiments/README_D_CORRELATION.md).
+The last-layer selector `scripts/select/kl.py` is also not the Gradient Swap
+used in Section 5.

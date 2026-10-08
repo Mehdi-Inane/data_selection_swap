@@ -4,7 +4,7 @@
 #SBATCH --error=train_full_ref_%A_%a.txt
 #SBATCH --array=0-29                 # 2 datasets × 3 architectures × 5 seeds
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
+#SBATCH --gres=gpu:1
 #SBATCH --time=15:00:00
 #SBATCH --mem=48Gb
 
@@ -25,22 +25,21 @@ source "${SCRIPT_DIR}/result_layout.sh"
 
 # OPTIMIZER=sgd keeps the historical trainer and directories.
 # OPTIMIZER=adam trains scripts/train/reference.py into the adam/ subfolder.
+# SEEDS_OVERRIDE is a space-separated list. The manuscript trains only seed 42:
+#   SEEDS_OVERRIDE=42 sbatch --array=0-5 scripts/slurm/run_full_data.sh
+# The default array 0-29 is 2 datasets x 3 architectures x 5 seeds.
 OPTIMIZER="${OPTIMIZER:-sgd}"
 VARIANT="$(layout_variant "$OPTIMIZER")"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 # ── Parameters ───────────────────────────────────────────────────────────────
 DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
 ARCHITECTURE_GRID="${ARCHITECTURES:-${ARCHITECTURE:-resnet18 vgg16 inception}}"
 read -r -a DATASETS <<< "$DATASET_GRID"
 read -r -a ARCHITECTURES <<< "$ARCHITECTURE_GRID"
-SEEDS=(42 43 44 45 46)
+read -r -a SEEDS <<< "${SEEDS_OVERRIDE:-42 43 44 45 46}"
 N_SEEDS=${#SEEDS[@]}
 N_ARCHITECTURES=${#ARCHITECTURES[@]}
 TOTAL_TASKS=$(( ${#DATASETS[@]} * N_ARCHITECTURES * N_SEEDS ))
@@ -52,7 +51,7 @@ IDX=$SLURM_ARRAY_TASK_ID
 SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
 ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
 DATASET=${DATASETS[$IDX]}
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 SAVE_DIR="${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}"
 

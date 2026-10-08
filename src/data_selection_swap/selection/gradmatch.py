@@ -34,6 +34,7 @@ from torch.utils.data import DataLoader, random_split
 from cords.utils.data.dataloader.SL.adaptive import GradMatchDataLoader
 
 from .. import common
+from ..paths import default_results_root
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,16 +64,13 @@ def resolve_base_dir(output_dir: Optional[str],
     """
     Resolve where artefacts are written, in priority order:
 
-      1. --output_dir (explicit, works everywhere including interactive runs)
-      2. $SCRATCH     (set automatically on Mila/SLURM clusters)
-      3. ./outputs    (safe local fallback, no env-var required)
+      1. --output_dir
+      2. RESULTS_ROOT, else SCRATCH, else ./results
     """
     if output_dir:
         root = output_dir
-    elif "SCRATCH" in os.environ:
-        root = os.path.join(os.environ["SCRATCH"], "gradmatch_baseline")
     else:
-        root = os.path.join(os.getcwd(), "outputs", "gradmatch_baseline")
+        root = os.path.join(default_results_root(), "gradmatch_baseline")
 
     base = os.path.join(root, dataset, str(budget), f"seed_{seed}")
     os.makedirs(base, exist_ok=True)

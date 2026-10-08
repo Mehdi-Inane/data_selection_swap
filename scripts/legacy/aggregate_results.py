@@ -19,7 +19,10 @@ import csv
 import numpy as np
 
 # ── Configuration — edit to match your runs ───────────────────────────────────
-BASE_DIR   = "/home/mila/a/ahmedm/scratch/gradmatch_swap/cifar10"
+BASE_DIR   = os.environ.get(
+    "BASE_DIR",
+    os.path.join(os.environ.get("RESULTS_ROOT", "results"), "gradmatch_swap", "cifar10"),
+)
 FRACTIONS  = [0.1, 0.2, 0.4, 0.5]
 N_TRAIN    = 45000          # 90 % of CIFAR-10 training set (50 000 × 0.9)
 SEEDS      = [42, 43, 44, 45, 46]

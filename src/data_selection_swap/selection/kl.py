@@ -71,7 +71,7 @@ from torch.utils.data import DataLoader, Subset, random_split
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
-from ..paths import storage_variant, tree
+from ..paths import default_results_root, storage_variant, tree
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -673,6 +673,12 @@ def main():
     p.add_argument('--fraction',       default=0.3,         type=float)
     p.add_argument('--seed', '-seed',   default=42,          type=int)
     p.add_argument('--checkpoint_dir', required=True,       type=str)
+    p.add_argument('--allow_manifest_mismatch', action='store_true',
+                   help='Use a reference trajectory from another split. The '
+                        'manuscript scores every selection seed against the '
+                        'seed-42 trajectory (Appendix G.1). Without this flag '
+                        'the trajectory seed, pool, dataset, and architecture '
+                        'must match this run.')
     p.add_argument('--dataset',        default='cifar100',  choices=list(common.DATASETS))
     p.add_argument('--architecture',   default=None, choices=list(common.ARCHITECTURES),
                    help='Network architecture. Defaults to resnet18, or lenet for MNIST.')
@@ -806,10 +812,11 @@ def main():
         checkpoint_weighting=args.checkpoint_weighting,
         expected_dataset=args.dataset, expected_seed=args.seed,
         expected_architecture=cfg['architecture'],
-        expected_pool_indices_sha256=pool_indices_sha256)
+        expected_pool_indices_sha256=pool_indices_sha256,
+        allow_manifest_mismatch=args.allow_manifest_mismatch)
     num_ckpts_used = len(checkpoints)
 
-    scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
+    scratch_path = default_results_root()
     variant = storage_variant(args.optimizer, args.retrain_optimizer)
     base_dir = os.path.join(
         tree(scratch_path, 'gradmatch_swap', variant),

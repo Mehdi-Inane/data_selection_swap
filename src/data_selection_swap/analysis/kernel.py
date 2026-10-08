@@ -37,7 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import N_TRAIN
 from .result_plots import (
     KL_DISPLAY_NAME,
@@ -387,7 +387,7 @@ def precompute_main(argv=None):
                    help='One split. Omit to loop --seeds. The kernel is per seed.')
     p.add_argument('--seeds', default=list(EXPERIMENT_SEEDS), type=int, nargs='+')
     p.add_argument('--data_dir', required=True)
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--checkpoint_dir', default=None,
                    help='Default: $SCRATCH/data_selection_swap/<dataset>/<architecture>/checkpoints '
                         'with a seed_<seed> child. "{seed}" is substituted.')
@@ -426,7 +426,7 @@ def score_main(argv=None):
     p.add_argument('--fractions', default=list(EXPERIMENT_FRACTIONS), type=float, nargs='+')
     p.add_argument('--seeds', default=list(EXPERIMENT_SEEDS), type=int, nargs='+')
     p.add_argument('--methods', default=None, nargs='+')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--out_dir', default=None,
                    help='Default: $SCRATCH/data_selection_baselines/plots')
     p.add_argument('--cache_csv', default=None)

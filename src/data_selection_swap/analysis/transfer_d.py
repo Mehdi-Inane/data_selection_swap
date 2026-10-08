@@ -56,7 +56,7 @@ import torch
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import N_TRAIN, RANDOM_METHOD
 from .score_subsets import random_subsets
 from .selection_overlap import collect_subsets, run_label
@@ -349,7 +349,7 @@ def main(argv=None):
                         '$SCRATCH/data_selection_swap/<dataset>/<target>/checkpoints/'
                         'seed_{seed}. The target architecture\'s own trajectory, since '
                         'that is what defines the objective being transferred to.')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' uses "
                         "the adam/ subfolders.")

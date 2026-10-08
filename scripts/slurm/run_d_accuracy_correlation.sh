@@ -4,7 +4,7 @@
 #SBATCH --error=d_alpha_corr_%A_%a.err
 #SBATCH --array=0-29
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
+#SBATCH --gres=gpu:1
 #SBATCH --time=7-00:00:00
 #SBATCH --mem=64G
 
@@ -21,16 +21,7 @@ fi
 export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 source "${SCRIPT_DIR}/result_layout.sh"
 
-# Override cluster setup when needed, e.g. CONDA_ENV=my_environment.
-if command -v module >/dev/null 2>&1; then
-    module load miniconda/3
-fi
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-if command -v conda >/dev/null 2>&1; then
-    set +u
-    conda activate "$CONDA_ENV"
-    set -u
-fi
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 # The first entry for every dataset is a BN-free primary control. ResNet cells
 # explicitly opt into the frozen-BN eval surrogate; they must not be described
@@ -53,7 +44,7 @@ SEED=${SEEDS[$SEED_INDEX]}
 read -r -a FRACTIONS <<< "${FRACTIONS_OVERRIDE:-0.1 0.2 0.4}"
 read -r -a SAMPLERS <<< "${SAMPLERS_OVERRIDE:-uniform stratified easy hard}"
 
-SCRATCH_BASE="${SCRATCH:-${PROJECT_ROOT}/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 REFERENCE_OPTIMIZER="${REFERENCE_OPTIMIZER:-${OPTIMIZER:-sgd}}"
 RETRAIN_OPTIMIZER="${RETRAIN_OPTIMIZER:-$REFERENCE_OPTIMIZER}"
 VARIANT="$(layout_variant "$REFERENCE_OPTIMIZER")"

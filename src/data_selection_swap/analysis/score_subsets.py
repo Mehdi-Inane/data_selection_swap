@@ -62,7 +62,7 @@ from scipy.stats import spearmanr
 from .. import common
 from .. import objective as d_alpha
 from .. import trajectory as ref
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import (N_TRAIN, RANDOM_METHOD, discover_methods,
                          discover_runs, indices_path_for, load_json, run_dir)
 from .result_plots import locate_checkpoint_dir
@@ -250,11 +250,15 @@ def main():
                    help='Dataset root. Needs the real images: D is computed from gradients. '
                         'Use a persistent path, not $SLURM_TMPDIR from another job.')
     p.add_argument('--checkpoint_dir', default=None,
-                   help='Reference trajectory directory or a template containing {seed}. '
-                        'Default: $SCRATCH/data_selection_swap/<dataset>/<architecture>/'
-                        'checkpoints/seed_{seed}. A distinct, manifest-validated trajectory '
-                        'is required for every split seed.')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+                   help='Reference trajectory directory, or a template containing {seed}. '
+                        'Default: <results>/data_selection_swap/<dataset>/<architecture>/'
+                        'checkpoints/seed_{seed}. Pass the seed-42 directory together with '
+                        '--allow_manifest_mismatch to reproduce Appendix G.1.')
+    p.add_argument('--allow_manifest_mismatch', action='store_true',
+                   help='Score a reference trajectory trained on another split. '
+                        'Required when every selection seed is scored on the seed-42 '
+                        'trajectory (Appendix G.1).')
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "and writes the adam/ subfolders.")
@@ -363,7 +367,8 @@ def main():
             checkpoint_weighting=args.checkpoint_weighting,
             expected_dataset=args.dataset, expected_seed=seed,
             expected_architecture=cfg.get('architecture'),
-            expected_pool_indices_sha256=pool_indices_sha256)
+            expected_pool_indices_sha256=pool_indices_sha256,
+            allow_manifest_mismatch=args.allow_manifest_mismatch)
         ckpt_paths = [c.path for c in checkpoints]
         weights = [c.weight for c in checkpoints]
 

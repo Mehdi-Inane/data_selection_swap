@@ -25,11 +25,7 @@ OPTIMIZER="${OPTIMIZER:-sgd}"
 VARIANT="$(layout_variant "$OPTIMIZER")"
 LR="$(layout_retrain_lr "$OPTIMIZER")"
 
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 # ── Grid ────────────────────────────────────────────────────────────────────
 DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
@@ -60,19 +56,22 @@ ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARC
 DATASET=${DATASETS[$IDX]}
 
 # ── Paths ───────────────────────────────────────────────────────────────────
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 if [ "$VARIANT" = adam ]; then
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
+    MISMATCH_ARGS=()
 else
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+    # Appendix G.1: one seed-42 reference trajectory for every selection seed.
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_42}"
+    MISMATCH_ARGS=(--allow_manifest_mismatch)
 fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
     INIT_CKPT_DIR="${SWAP_ROOT}/init"
 fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then
-    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
+    echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
     exit 1
 fi
 
@@ -112,4 +111,5 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --proj_dim "${PROJ_DIM:-0}" \
     --proj_seed "${PROJ_SEED:-0}" \
     "${RETRAIN_ARGS[@]}" \
-    "${INIT_ARGS[@]}"
+    "${INIT_ARGS[@]}" \
+    "${MISMATCH_ARGS[@]}"

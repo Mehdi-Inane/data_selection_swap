@@ -31,11 +31,7 @@ else
     VARIANT_ARG="$VARIANT"
 fi
 
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 DATASET_GRID="${DATASETS:-cifar10 cifar100}"
 ARCHITECTURE_GRID="${ARCHITECTURES:-resnet18 vgg16 inception}"
@@ -52,7 +48,7 @@ IDX=$SLURM_ARRAY_TASK_ID
 ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
 DATASET=${DATASETS[$IDX]}
 
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 echo "Score kernel: dataset=$DATASET architecture=$ARCHITECTURE proj_dim=${PROJ_DIM:-4096}"
 srun python "${PROJECT_ROOT}/scripts/analyze/score_kernel.py" \
     --dataset "$DATASET" \

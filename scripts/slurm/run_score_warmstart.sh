@@ -31,18 +31,21 @@ else
     VARIANT_ARG="$VARIANT"
 fi
 
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 DATASET=cifar10
 ARCHITECTURE=resnet18
 FRACTION=0.1
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+if [ "$VARIANT" = adam ]; then
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_{seed}}"
+    MISMATCH_ARGS=()
+else
+    # Appendix G.1: score every selection seed on the seed-42 trajectory.
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_42}"
+    MISMATCH_ARGS=(--allow_manifest_mismatch)
+fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
     echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
@@ -62,4 +65,5 @@ srun python "${PROJECT_ROOT}/scripts/plot/baseline_warmstart.py" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --scratch "$SCRATCH_BASE" \
     --variant "$VARIANT_ARG" \
-    --download
+    --download \
+    "${MISMATCH_ARGS[@]}"

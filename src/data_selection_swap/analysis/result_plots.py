@@ -46,7 +46,7 @@ import sys
 
 import numpy as np
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import (N_TRAIN, discover_methods, discover_runs,
                          indices_path_for, load_json, mean_std, run_dir)
 
@@ -616,7 +616,8 @@ def score_missing(rows, args, scoring, cache_path, logger):
             checkpoint_weighting=args.checkpoint_weighting,
             expected_dataset=args.dataset, expected_seed=seed,
             expected_architecture=cfg.get('architecture'),
-            expected_pool_indices_sha256=pool_hash)
+            expected_pool_indices_sha256=pool_hash,
+            allow_manifest_mismatch=getattr(args, 'allow_manifest_mismatch', False))
         logger.info(f"Scoring seed {seed} on {len(checkpoints)} checkpoints "
                     f"({description}), {len(seed_rows)} subsets.")
 
@@ -667,7 +668,7 @@ def main(argv=None):
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--methods', default=None, nargs='+',
                    help='Default: every KL variant and baseline found on disk.')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "and writes the adam/ subfolders.")
@@ -679,9 +680,13 @@ def main(argv=None):
                         'Omit it to redraw from the D cache only.')
     p.add_argument('--checkpoint_dir', default=None,
                    help='Reference trajectory. Default: '
-                        '$SCRATCH/data_selection_swap/<dataset>/<architecture>/checkpoints '
+                        '<results>/data_selection_swap/<dataset>/<architecture>/checkpoints '
                         'with a seed_<seed> subdirectory when that is where the run was saved. '
-                        'A "{seed}" placeholder is substituted.')
+                        'A "{seed}" placeholder is substituted. Point this at seed_42 and pass '
+                        '--allow_manifest_mismatch for the manuscript protocol.')
+    p.add_argument('--allow_manifest_mismatch', action='store_true',
+                   help='Score the seed-42 reference trajectory for every selection seed '
+                        '(Appendix G.1).')
     p.add_argument('--skip_objective', action='store_true', default=False,
                    help='Do not score D, even if --data_dir is set. Plot 2 uses the cache.')
     p.add_argument('--num_checkpoints', default=0, type=int,

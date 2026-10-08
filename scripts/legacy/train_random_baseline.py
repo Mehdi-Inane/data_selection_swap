@@ -51,7 +51,9 @@ def main():
     budget = int(args.fraction * n_train)
 
     # ── CHANGED: seed sub-directory so runs never overwrite each other ────────────
-    base_save_directory = f"/home/mila/a/ahmedm/scratch/gradmatch_swap/cifar100/{budget}/seed_{args.seed}"
+    results_root = os.environ.get("RESULTS_ROOT", "results")
+    base_save_directory = os.path.join(
+        results_root, "gradmatch_swap", "cifar100", str(budget), f"seed_{args.seed}")
     os.makedirs(base_save_directory, exist_ok=True)
     
     LOG_FILE = os.path.join(base_save_directory, f"random_{budget}_training.log")

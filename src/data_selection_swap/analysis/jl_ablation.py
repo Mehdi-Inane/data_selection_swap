@@ -22,7 +22,7 @@ import argparse
 import os
 import re
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .checkpoint_ablation import (
     ARCHITECTURE_NAMES, ARCHITECTURES, full_method, print_accuracy,
 )
@@ -184,7 +184,7 @@ def main(argv=None):
     p.add_argument('--methods', default=None, nargs='+',
                    help='Filename prefix before _<budget>_K. '
                         'Default: kl_faithful_full_<architecture>_sgd[_jl<p>].')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "the adam/ subfolders and the _adam filename prefix.")

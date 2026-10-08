@@ -30,9 +30,9 @@ BUDGET = int(FRAC * 50000)
 
 INDEX_PATHS: Dict[str, str] = {
     "GradMatch": f"gradmatch_cifar10_idxs_budget_{BUDGET}.npy",
-    "Alg3": "/home/mila/a/ahmedm/scratch/data_selection_swap/cifar10/selection/20000_points/alg3_indices.npy",
-    "Random": "/home/mila/a/ahmedm/scratch/data_selection_swap/cifar10/selection/20000_points/random_indices.npy",
-    "K-Center": "/home/mila/a/ahmedm/scratch/data_selection_swap/cifar10/selection/20000_points/kcenter_indices.npy",
+    "Alg3": os.environ.get("ALG3_INDICES", "alg3_indices.npy"),
+    "Random": os.environ.get("RANDOM_INDICES", "random_indices.npy"),
+    "K-Center": os.environ.get("KCENTER_INDICES", "kcenter_indices.npy"),
 }
 
 EPOCHS = 300
@@ -68,12 +68,12 @@ test_transform = transforms.Compose([
     transforms.Normalize(MEAN, STD),
 ])
 
-# Copy raw tarball to SLURM_TMPDIR once
-source_tar = "/network/datasets/cifar10/cifar-10-python.tar.gz"
+# Optional local tarball. When CIFAR10_ARCHIVE is unset, torchvision downloads.
+source_tar = os.environ.get("CIFAR10_ARCHIVE", "")
 data_dir = os.environ.get("SLURM_TMPDIR", "./data")
 target_tar = os.path.join(data_dir, "cifar-10-python.tar.gz")
 
-if not os.path.exists(target_tar):
+if source_tar and not os.path.exists(target_tar):
     logger.info(f"Copying dataset to local storage ({data_dir})...")
     os.makedirs(data_dir, exist_ok=True)
     shutil.copy(source_tar, target_tar)

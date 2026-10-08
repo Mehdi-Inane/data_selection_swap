@@ -82,7 +82,7 @@ import json
 import os
 import re
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 
 import numpy as np
 
@@ -399,7 +399,7 @@ def main():
                    help='Restrict the report to these --num_checkpoints (K) values. '
                         'Default: report every K discovered on disk, plus every '
                         'method that does not tag K at all.')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "the adam/ subfolders.")

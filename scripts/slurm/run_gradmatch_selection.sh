@@ -4,7 +4,7 @@
 #SBATCH --error=gradmatch_cifar10_%A_%a.txt
 #SBATCH --array=0-19                 # 20 tasks = 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
+#SBATCH --gres=gpu:1
 #SBATCH --time=06:00:00              # CIFAR-10 300 epochs is ~1-2 hrs/run; 6 is generous
 #SBATCH --mem=24Gb                   # CIFAR-10 is small; 24 GB is enough
 
@@ -22,11 +22,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 # ── Experiment grid ───────────────────────────────────────────────────────────
 FRACTIONS=(0.1 0.2 0.4 0.5)
@@ -41,13 +37,13 @@ SEED=${SEEDS[$SEED_IDX]}
 ARCHITECTURE="${ARCHITECTURE:-resnet18}"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 INIT_CKPT="${SCRATCH_BASE}/data_selection_swap/init/cifar10_${ARCHITECTURE}_seed${SEED}.pth"
 
 # Where CIFAR-10 is already installed on the shared filesystem.
 # torchvision expects: $CIFAR10_CACHE/cifar-10-batches-py/
 # Adjust this to wherever you ran `datasets.CIFAR10(download=True)` previously.
-CIFAR10_CACHE="/network/datasets/cifar10"
+CIFAR10_CACHE="${CIFAR10_CACHE:-}"
 
 # Node-local SSD destination (fast local I/O during training).
 LOCAL_DATA="${SLURM_TMPDIR}/cifar10_data"

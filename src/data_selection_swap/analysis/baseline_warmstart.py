@@ -21,7 +21,7 @@ import sys
 
 import numpy as np
 
-from ..paths import normalize_variant, tree
+from ..paths import default_results_root, normalize_variant, tree
 from .checkpoint_ablation import full_method
 from .comparison import (
     N_TRAIN, discover_runs, indices_path_for, load_json, mean_std, run_dir,
@@ -332,6 +332,7 @@ def _score_namespace(args, gbar_cache_dir):
         momentum_response='persistent',
         adam_eps=1e-8,
         gbar_cache_dir=gbar_cache_dir,
+        allow_manifest_mismatch=getattr(args, 'allow_manifest_mismatch', False),
     )
 
 
@@ -344,7 +345,7 @@ def main(argv=None):
     p.add_argument('--seeds', default=[42, 43, 44, 45, 46], type=int, nargs='+')
     p.add_argument('--methods', default=list(BASELINES), nargs='+',
                    choices=list(BASELINES))
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'])
     p.add_argument('--out_dir', default=None,
                    help='Default: $SCRATCH/data_selection_baselines[/adam]/baseline_warmstart')
@@ -352,7 +353,10 @@ def main(argv=None):
                    help='Dataset root. Required the first time a missing G_T is scored.')
     p.add_argument('--checkpoint_dir', default=None,
                    help='Reference trajectory. Default: '
-                        '$SCRATCH/data_selection_swap/<dataset>/<architecture>/checkpoints')
+                        '<results>/data_selection_swap/<dataset>/<architecture>/checkpoints. '
+                        'Use checkpoints/seed_42 with --allow_manifest_mismatch for Appendix G.1.')
+    p.add_argument('--allow_manifest_mismatch', action='store_true',
+                   help='Score the seed-42 reference trajectory for every selection seed.')
     p.add_argument('--download', action='store_true', default=False)
     args = p.parse_args(argv)
 
