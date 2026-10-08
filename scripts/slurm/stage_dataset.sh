@@ -8,9 +8,12 @@
 #
 # Supported datasets: "cifar10", "cifar100", "imagenet"
 
-IMAGENET_RAW_DIR="/network/datasets/imagenet"
-CIFAR10_ARCHIVE="/network/datasets/cifar10/cifar-10-python.tar.gz"
-CIFAR100_ARCHIVE="/network/datasets/cifar100/cifar-100-python.tar.gz"
+# Optional shared-filesystem copies. Leave unset and the training scripts
+# download CIFAR-10, CIFAR-100, and MNIST. ImageNet has no public download
+# here, so IMAGENET_RAW_DIR must point at a local copy.
+IMAGENET_RAW_DIR="${IMAGENET_RAW_DIR:-}"
+CIFAR10_ARCHIVE="${CIFAR10_ARCHIVE:-}"
+CIFAR100_ARCHIVE="${CIFAR100_ARCHIVE:-}"
 
 # Extract a CIFAR tarball into $local_data unless it is already there.
 # Args: <pretty name> <archive path> <folder created by the archive> <local_data>

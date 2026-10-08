@@ -16,9 +16,6 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 mkdir -p "${PROJECT_ROOT}/logs"
 
 
-module load miniconda/3
-set +u                                # conda's activate script references unbound $PS1 under `set -u`
-conda activate gradmatch    # conda create -n faithful_selection python=3.12 + pip install -r requirements.txt
-set -u
+source "${PROJECT_ROOT}/scripts/slurm/cluster_env.sh"
 
 srun python3 "${PROJECT_ROOT}/scripts/legacy/train_baselines.py"

@@ -59,6 +59,7 @@ trajectory = types.ModuleType(f"{PACKAGE}.trajectory")
 paths = types.ModuleType(f"{PACKAGE}.paths")
 paths.storage_variant = lambda *names: ''
 paths.tree = lambda scratch, root_name, variant='': scratch
+paths.default_results_root = lambda: 'results'
 sys.modules.update({
     PACKAGE: package,
     f"{PACKAGE}.selection": selection_package,

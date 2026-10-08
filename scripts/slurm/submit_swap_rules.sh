@@ -20,7 +20,7 @@ if [ ! -f "$CONFIG" ]; then
     exit 2
 fi
 
-OUTPUT_ROOT="${2:-${SWAP_RULE_OUTPUT_ROOT:-${SCRATCH:-${PROJECT_ROOT}/results}/data_selection_swap/swap_rules}}"
+OUTPUT_ROOT="${2:-${SWAP_RULE_OUTPUT_ROOT:-${RESULTS_ROOT:-${SCRATCH:-${PROJECT_ROOT}/results}}/data_selection_swap/swap_rules}}"
 MAX_PARALLEL="${SWAP_RULE_MAX_PARALLEL:-8}"
 LOG_DIR="${PROJECT_ROOT}/logs/swap_rules"
 mkdir -p "$LOG_DIR"

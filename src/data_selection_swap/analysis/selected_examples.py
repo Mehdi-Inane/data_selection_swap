@@ -27,7 +27,7 @@ import os
 
 import numpy as np
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .checkpoint_ablation import ARCHITECTURE_NAMES, full_method
 from .comparison import N_TRAIN, run_dir
 from .selection_overlap import (
@@ -262,8 +262,7 @@ def main(argv=None):
                    help='RNG seed for which selected examples appear.')
     p.add_argument('--data_dir', required=True,
                    help='Dataset root, usually $SLURM_TMPDIR after staging.')
-    p.add_argument('--scratch', default=os.environ.get(
-        'SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' "
                         "reads the adam/ subfolders.")

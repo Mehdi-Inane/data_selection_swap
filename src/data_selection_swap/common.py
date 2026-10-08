@@ -40,7 +40,7 @@ import torchvision.models as tv_models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset, random_split
 
-from .paths import storage_variant, tree
+from .paths import default_results_root, storage_variant, tree
 from torchvision.models.googlenet import BasicConv2d
 
 DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet')
@@ -777,7 +777,7 @@ def save_timing(path: str, timer: SelectionTimer, logger, **extra):
 def get_save_paths(method: str, dataset: str, architecture: str,
                    budget: int, seed: int, variant: str = '') -> dict:
     """Baseline artifacts. ``variant='adam'`` writes under ``baselines/adam/``."""
-    scratch_path = os.environ.get("SCRATCH", "/home/mila/a/ahmedm/scratch")
+    scratch_path = default_results_root()
     base_dir = os.path.join(
         tree(scratch_path, 'data_selection_baselines', variant),
         method, dataset, architecture, str(budget), f'seed_{seed}',

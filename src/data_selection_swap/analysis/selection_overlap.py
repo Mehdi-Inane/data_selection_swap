@@ -68,7 +68,7 @@ import sys
 import numpy as np
 import torch
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import N_TRAIN, load_json, run_dir
 from .d_accuracy_scatter import expand_inputs
 from .result_plots import is_kl_method
@@ -1164,7 +1164,7 @@ def main(argv=None):
                    help='Default: every method that saved indices on disk.')
     p.add_argument('--checkpoints', default=None, type=int, nargs='+',
                    help="Restrict to runs tagged with these K values.")
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "the adam/ subfolders.")

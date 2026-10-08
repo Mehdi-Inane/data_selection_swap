@@ -57,7 +57,7 @@ import sys
 import numpy as np
 from scipy.stats import rankdata
 
-from ..paths import tree
+from ..paths import default_results_root, tree
 from .comparison import RANDOM_METHOD
 
 
@@ -547,7 +547,7 @@ def main(argv=None):
                         'Files, directories, or globs.')
     p.add_argument('--out_dir', default=None,
                    help='Default: $SCRATCH/data_selection_baselines[/adam]/plots')
-    p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
+    p.add_argument('--scratch', default=default_results_root())
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
                         "full-data metrics and writes figures under the adam/ subfolders.")

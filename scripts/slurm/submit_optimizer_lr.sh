@@ -24,7 +24,7 @@ if [ ! -f "$CONFIG" ]; then
     exit 2
 fi
 
-OUTPUT_ROOT="${2:-${OPT_LR_OUTPUT_ROOT:-${SCRATCH:-${PROJECT_ROOT}/results}/data_selection_swap/optimizer_lr}}"
+OUTPUT_ROOT="${2:-${OPT_LR_OUTPUT_ROOT:-${RESULTS_ROOT:-${SCRATCH:-${PROJECT_ROOT}/results}}/data_selection_swap/optimizer_lr}}"
 MAX_PARALLEL="${OPT_LR_MAX_PARALLEL:-8}"
 LOG_DIR="${PROJECT_ROOT}/logs/optimizer_lr"
 mkdir -p "$LOG_DIR"

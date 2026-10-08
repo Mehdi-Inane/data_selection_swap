@@ -50,7 +50,7 @@ from cords.selectionstrategies.SL import GradMatchStrategy
 
 # Point this to wherever CIFAR-10 is already stored on your cluster.
 # torchvision will not re-download if the data already exists there.
-DATA_DIR = "/network/datasets/cifar10"   # <-- adjust
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
 FRAC = 0.3
 
@@ -104,13 +104,13 @@ eval_transform = transforms.Compose([
 # Set download=False if the data is already present; True to auto-fetch.
 
 
-source_tar = "/network/datasets/cifar10/cifar-10-python.tar.gz"
+source_tar = os.environ.get("CIFAR10_ARCHIVE", "")
 data_dir = os.environ.get("SLURM_TMPDIR", "./data") # Fallback to ./data if not on a Slurm node
 target_tar = os.path.join(data_dir, "cifar-10-python.tar.gz")
 
 # 2. Copy the compressed file to the node's local storage (only if it hasn't been copied yet)
-if not os.path.exists(target_tar):
-    print(f"Copying dataset from network to {data_dir}...")
+if source_tar and not os.path.exists(target_tar):
+    print(f"Copying dataset archive to {data_dir}...")
     os.makedirs(data_dir, exist_ok=True)
     shutil.copy(source_tar, target_tar)
 

@@ -1,10 +1,13 @@
 #!/bin/bash
+# Last-layer checkpoint sweep. This is not manuscript Table 1 or Appendix J.
+# Those tables are full-network Gradient Swap and use
+# scripts/slurm/run_kl_full_selection_checkpoints.sh (K in 1 4 10 15 20).
 #SBATCH --job-name=kl_checkpoint_ablation
 #SBATCH --output=logs/kl_ckpt_ablation_%A_%a.txt
 #SBATCH --error=logs/kl_ckpt_ablation_%A_%a.txt
 #SBATCH --array=0-99                 # 100 tasks = 4 fractions × 5 seeds × 5 checkpoint counts
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1         # Adjust GPU type if required
+#SBATCH --gres=gpu:1         # Adjust GPU type if required
 #SBATCH --time=15:00:00
 #SBATCH --mem=48Gb
 
@@ -22,11 +25,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 mkdir -p "${PROJECT_ROOT}/logs"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 # ── Experiment Hyperparameters ───────────────────────────────────────────────
 DATASET="cifar100"  # Options: "imagenet" or "cifar100" (override with DATASET_OVERRIDE)
@@ -62,7 +61,7 @@ SEED=${SEEDS[$SEED_IDX]}
 NUM_CHECKPOINTS=${CHECKPOINTS[$CKPT_IDX]}
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 CHECKPOINT_DIR="${SCRATCH_BASE}/data_selection_swap/${DATASET}/checkpoints"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"

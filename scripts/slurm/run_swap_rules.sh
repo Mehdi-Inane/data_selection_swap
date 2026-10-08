@@ -1,7 +1,7 @@
 #!/bin/bash
 # One array task for the paired Algorithm 2 vs Algorithm 3 experiment.
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
+#SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --mem=48G
 
@@ -23,14 +23,7 @@ DRIVER="${PROJECT_ROOT}/scripts/experiments/compare_swap_rules.py"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-if command -v module >/dev/null 2>&1; then
-    module load "${SWAP_RULE_MINICONDA_MODULE:-miniconda/3}"
-fi
-if command -v conda >/dev/null 2>&1; then
-    set +u
-    conda activate "${SWAP_RULE_CONDA_ENV:-${CONDA_ENV:-kl_select}}"
-    set -u
-fi
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 DATASET="$(python "$DRIVER" task-field \
     --config "$SWAP_RULE_CONFIG" --stage "$SWAP_RULE_STAGE" \

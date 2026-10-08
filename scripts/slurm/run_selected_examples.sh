@@ -35,11 +35,7 @@ else
     VARIANT_ARG="$VARIANT"
 fi
 
-module load miniconda/3
-CONDA_ENV="${CONDA_ENV:-kl_select}"
-set +u
-conda activate "$CONDA_ENV"
-set -u
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 DATASET_GRID="${DATASETS:-cifar10 cifar100}"
 ARCHITECTURE_GRID="${ARCHITECTURES:-resnet18 vgg16 inception}"
@@ -53,7 +49,7 @@ if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= TOTAL_TASKS )); then
 fi
 DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 
-SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
+SCRATCH_BASE="$RESULTS_ROOT"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 FRACTION="${FRACTION:-0.1}"
 SEED="${SEED:-42}"

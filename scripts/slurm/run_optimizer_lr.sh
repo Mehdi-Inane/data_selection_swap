@@ -3,7 +3,7 @@
 # dependencies are supplied by submit_optimizer_lr.sh rather than duplicated
 # in an SBATCH header.
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:rtx8000:1
+#SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 #SBATCH --mem=48G
 
@@ -25,14 +25,7 @@ DRIVER="${PROJECT_ROOT}/scripts/experiments/optimizer_lr.py"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-if command -v module >/dev/null 2>&1; then
-    module load "${OPT_LR_MINICONDA_MODULE:-miniconda/3}"
-fi
-if command -v conda >/dev/null 2>&1; then
-    set +u
-    conda activate "${OPT_LR_CONDA_ENV:-${CONDA_ENV:-kl_select}}"
-    set -u
-fi
+source "${SCRIPT_DIR}/cluster_env.sh"
 
 DATASET="$(python "$DRIVER" task-field \
     --config "$OPT_LR_CONFIG" \

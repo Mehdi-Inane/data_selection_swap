@@ -18,7 +18,7 @@ selection-rule-only experiment.
 | Retraining | Optimizer matched to the score (SGD for uniform/SGD, Adam for Adam), cosine schedule, 300 / 350 epochs, bs 128, unweighted CE |
 | Metric | Final-epoch top-1 test accuracy. Controlled drivers evaluate the official test set once per fit. |
 | Scoring view | `--scoring_transform` — same value for every method (see §4) |
-| Hardware | Same GPU type (`rtx8000`), 4 workers, one job per GPU |
+| Hardware | Same GPU type for every timed job, 4 workers, one job per GPU |
 
 Every reference is seed matched to the split it represents. Its manifest stores
 the dataset, architecture, seed, schedule, initial-state fingerprint, and hash
@@ -131,23 +131,15 @@ second is the honest cost when no full-data model exists yet.
 
 ## 7. Running
 
-Slurm launchers default to the **`kl_select`** conda environment on Mila
-(`CONDA_ENV=kl_select`; override with `CONDA_ENV=...` when submitting). Use
-Python 3.9+ and PyTorch 2.0+ so full-network KL (`kl_full`) can import
-`torch.func`.
+Launchers use the Python on `PATH`. Set `CONDA_MODULE` and `CONDA_ENV` when a
+cluster module and conda environment should be activated. Results go to
+`RESULTS_ROOT`, then `SCRATCH`, then `./results`. Use Python 3.9+ and
+PyTorch 2.0+ so full-network Gradient Swap can import `torch.func`.
 
-```bash
-# General exploratory paths
-sbatch scripts/slurm/run_full_data.sh
-sbatch scripts/slurm/run_kl_selection.sh
-sbatch scripts/slurm/run_baselines.sh
-
-# Controlled requested experiments
-scripts/slurm/submit_optimizer_lr.sh scripts/experiments/optimizer_lr.example.json
-scripts/slurm/submit_swap_rules.sh scripts/experiments/swap_rules.example.json
-STAGE=reference sbatch scripts/slurm/run_d_accuracy_correlation.sh
-# Submit STAGE=evaluate only after the reference array succeeds.
-```
+The manuscript commands, including the shared seed-42 trajectory, are in the
+repository README. Optimizer/learning-rate, swap-rule, and D(alpha)
+correlation drivers under `scripts/experiments/` are extra controlled
+experiments and are not reported in the manuscript.
 
 To measure selection time without the retraining cost, add `--selection_only`.
 For exact commands, task counts, immutable artifact schemas, and analysis, see
