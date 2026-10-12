@@ -87,7 +87,6 @@ import os
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import random_split
 
 from .. import common
 from .. import objective as d_alpha
@@ -748,18 +747,14 @@ def main():
     NUM_EPOCHS  = cfg['num_epochs']
     device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    n_val   = int(0.1 * len(cfg['full_train']))
-    n_train = len(cfg['full_train']) - n_val
+    trainset = common.make_train_set(cfg)
+    n_train  = len(trainset)
     budget  = int(args.fraction * n_train)
     if not 1 <= budget < n_train:
         raise ValueError(
             f"--fraction={args.fraction!r} gives budget={budget}; require "
             f"1 <= budget < n_train={n_train}."
         )
-    trainset, _ = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
     pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
 
     init_index = None
