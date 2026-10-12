@@ -58,7 +58,7 @@ def main():
                                     architecture=args.architecture)
     full_train = cfg['full_train']
 
-    n_val   = int(0.1 * len(full_train))
+    n_val   = 0
     n_train = len(full_train) - n_val
 
     # Ensure the exact same trainset is used to compute the trajectory
@@ -158,7 +158,8 @@ def main():
         model.train()
         running_loss = 0.0
 
-        save_this_epoch = epoch <= 10 or epoch % 10 == 0 or epoch == NUM_EPOCHS
+        #save_this_epoch = epoch <= 10 or epoch % 10 == 0 or epoch == NUM_EPOCHS
+        save_this_epoch = True
         checkpoint_snapshot = None
         checkpoint_step = None
         for batch_index, (inputs, targets) in enumerate(trainloader):
