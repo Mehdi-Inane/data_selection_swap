@@ -69,7 +69,7 @@ if [ ! -d "$CHECKPOINT_DIR" ]; then
 fi
 
 N_FULL=50000
-N_TRAIN=$(( N_FULL - N_FULL / 10 ))
+N_TRAIN=$N_FULL   # whole training set, no validation hold-out
 BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
 INIT_INDICES="${BASE_ROOT}/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}/${METHOD}_${BUDGET}_indices.pt"
 if [ ! -s "$INIT_INDICES" ]; then

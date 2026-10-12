@@ -108,7 +108,7 @@ case "$DATASET" in
     imagenet)         N_FULL=1281167 ;;
     *) echo "Cannot derive the training-pool size for dataset=$DATASET" >&2; exit 1 ;;
 esac
-N_TRAIN=$(( N_FULL - N_FULL / 10 ))
+N_TRAIN=$N_FULL   # whole training set, no validation hold-out
 BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
 RESULT_DIR="${BASE_ROOT}/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}"
 RESULT_MODEL="${RESULT_DIR}/${METHOD}_${BUDGET}_model.pth"

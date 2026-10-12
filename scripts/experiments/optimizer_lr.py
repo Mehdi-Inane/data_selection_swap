@@ -789,7 +789,7 @@ def run_retrain(task: dict[str, Any], config: dict[str, Any], output_root: Path,
         import torch
         import torch.nn as nn
         from torch.optim.lr_scheduler import CosineAnnealingLR
-        from torch.utils.data import DataLoader, Subset, random_split
+        from torch.utils.data import DataLoader, Subset
         from data_selection_swap import common
 
         settings = task["retraining"]
@@ -799,12 +799,8 @@ def run_retrain(task: dict[str, Any], config: dict[str, Any], output_root: Path,
             task["dataset"], str(data_dir), download=download,
             architecture=task["architecture"],
         )
-        n_val = int(0.1 * len(cfg["full_train"]))
-        n_train = len(cfg["full_train"]) - n_val
-        trainset, _ = random_split(
-            cfg["full_train"], [n_train, n_val],
-            generator=torch.Generator().manual_seed(task["seed"]),
-        )
+        trainset = common.make_train_set(cfg)
+        n_train = len(trainset)
         indices_path = selection_dir / "indices.pt"
         selected_indices = torch.load(indices_path, map_location="cpu").long().reshape(-1)
         expected_budget = int(task["fraction"] * n_train)

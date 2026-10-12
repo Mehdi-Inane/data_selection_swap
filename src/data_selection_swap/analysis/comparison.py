@@ -86,11 +86,12 @@ from ..paths import tree
 
 import numpy as np
 
+# Selection pool = the full training set (no validation hold-out).
 N_TRAIN = {
-    'cifar10': 45000,
-    'cifar100': 45000,
-    'mnist': 54000,
-    'imagenet': 1281167 - int(0.1 * 1281167),
+    'cifar10': 50000,
+    'cifar100': 50000,
+    'mnist': 60000,
+    'imagenet': 1281167,
 }
 
 # Method label for the fresh random draws that estimate E_U[D]. They carry a D

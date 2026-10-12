@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import random_split
 
 from data_selection_swap.analysis import comparison
 from data_selection_swap.analysis import selection_overlap as overlap
@@ -93,27 +92,19 @@ class StratifiedTest(unittest.TestCase):
 
 
 class PoolMappingTest(unittest.TestCase):
-    def test_pool_indices_matches_a_real_random_split(self):
+    def test_pool_is_the_full_training_set_in_order(self):
         total = overlap.N_TOTAL[DATASET]
-        n_val = int(0.1 * total)
-        trainset, _ = random_split(
-            range(total), [total - n_val, n_val],
-            generator=torch.Generator().manual_seed(42))
         np.testing.assert_array_equal(
-            overlap.pool_indices(DATASET, 42), np.asarray(trainset.indices))
+            overlap.pool_indices(DATASET, 42), np.arange(total))
 
     def test_pool_size_agrees_with_the_comparison_table(self):
         for dataset in ('cifar10', 'cifar100', 'mnist'):
             self.assertEqual(overlap.pool_indices(dataset, 42).size,
                              comparison.N_TRAIN[dataset])
 
-    def test_different_seeds_index_different_images(self):
-        a = overlap.pool_indices(DATASET, 42)
-        b = overlap.pool_indices(DATASET, 43)
-        self.assertFalse(np.array_equal(a, b))
-        # Each pool holds 90% of the split, so they share roughly 81% of it.
-        shared = np.intersect1d(a, b).size
-        self.assertAlmostEqual(shared / a.size, 0.9, delta=0.02)
+    def test_pool_does_not_depend_on_the_seed(self):
+        np.testing.assert_array_equal(
+            overlap.pool_indices(DATASET, 42), overlap.pool_indices(DATASET, 43))
 
     def test_unknown_dataset_is_refused(self):
         with self.assertRaises(KeyError):
