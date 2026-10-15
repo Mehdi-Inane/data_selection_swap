@@ -82,7 +82,6 @@ srun python "${PROJECT_ROOT}/scripts/analyze/score_subsets.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
     --data_dir "$LOCAL_DATA" \
-    --checkpoint_dir "${CHECKPOINT_DIR}/" \
     --scratch "$SCRATCH_BASE" \
     --fractions "$FRACTION" \
     --seeds "${SEEDS[@]}" \
