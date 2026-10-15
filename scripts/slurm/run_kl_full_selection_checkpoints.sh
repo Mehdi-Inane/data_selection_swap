@@ -65,7 +65,7 @@ SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 if [ "$VARIANT" = adam ]; then
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 else
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}}"
 fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
@@ -89,7 +89,7 @@ if [ -n "${RETRAIN_OPTIMIZER:-}" ]; then
     RETRAIN_ARGS=(--retrain_optimizer "$RETRAIN_OPTIMIZER")
 fi
 
-echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION K=$K seed=$SEED proj_dim=${PROJ_DIM:-0} (task $SLURM_ARRAY_TASK_ID/$TOTAL_TASKS)"
+echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION K=$K seed=$SEED proj_dim=${PROJ_DIM:-0} (task $SLURM_ARRAY_TASK_ID/$TOTAL_TASKS) checkpoint_dir=$CHECKPOINT_DIR"
 srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
