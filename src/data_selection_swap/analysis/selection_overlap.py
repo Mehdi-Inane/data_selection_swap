@@ -15,12 +15,12 @@ o, so it ranks pairs identically and is carried only as a familiar number.
 
 Why the pool-relative indices can be intersected directly
 ─────────────────────────────────────────────────────────
-``common.make_loaders`` draws the train/val split from a generator seeded only
-by ``seed``; the architecture never enters. So at a fixed seed, index i means
-the same image for every architecture and every method, and the saved index
-tensors are directly comparable. Across *seeds* both the pool ordering and the
-pool membership change, so that contrast maps back to absolute dataset indices
-(``pool_indices``) and conditions on the two pools' intersection.
+The selection pool is the whole training set in its natural order
+(``common.make_train_set``); neither the architecture nor the seed enters. So
+index i means the same image for every architecture, method and seed, and the
+saved index tensors are directly comparable. ``pool_indices`` is therefore the
+identity map, kept so the cross-seed contrast still goes through absolute
+dataset indices, and conditioning on the two pools' intersection is a no-op.
 
 Three contrasts, all on the same kappa scale
 ────────────────────────────────────────────
@@ -35,7 +35,7 @@ doing no more than reseeding, and if the architecture kappa is far below it
 the architecture genuinely decides which examples are picked.
 
 No significance test is reported, on purpose. Overlap under independence is
-Hypergeometric with a standard deviation of ~19 examples at n = 50000,
+Hypergeometric with a standard deviation of ~20 examples at n = 50000,
 m = 5000, so every pair clears any p-value threshold by a wide margin while
 saying nothing about effect size. The hypergeometric sd is written to the CSV
 as the measurement-noise scale instead.

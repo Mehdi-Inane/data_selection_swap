@@ -253,7 +253,7 @@ class ObjectiveScorer:
     saved indices.pt against that cached trajectory. The factors for a
     given (seed, K) is reused across every fraction and every K-tagged
     method that shares it, since neither depends on the fraction/method —
-    only on the seed (it fixes the train/val split) and K (how many
+    only on the seed (it fixes the reference trajectory) and K (how many
     checkpoints feed the kernel).
     """
 
@@ -330,11 +330,7 @@ class ObjectiveScorer:
             return self._traj_cache[key]
 
         X, Y, n_train, pool_hash = self._pool(seed)
-        checkpoint_dir = self.checkpoint_dir.format(seed=seed)
-        if not os.path.isfile(os.path.join(checkpoint_dir, self.ref.MANIFEST_NAME)):
-            seeded = os.path.join(checkpoint_dir, f'seed_{seed}')
-            if os.path.isdir(seeded):
-                checkpoint_dir = seeded
+        checkpoint_dir = self.ref.locate_seed_dir(self.checkpoint_dir, seed)
         checkpoints, _, _ = self.ref.resolve(
             checkpoint_dir, optimizer='uniform',
             num_checkpoints=k or 0, selection='spread', n_train=n_train,

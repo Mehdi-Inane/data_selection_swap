@@ -21,10 +21,9 @@ drawing at random. No retraining is involved.
 
 Why one architecture's indices are meaningful to another
 ────────────────────────────────────────────────────────
-``common.make_loaders`` seeds the train/val split from ``seed`` alone, so at a
-fixed seed the pool is the same images in the same order for every
-architecture, and a saved index tensor is a valid set of pool positions no
-matter which architecture produced it.
+The pool is the whole training set (``common.make_train_set``): the same images
+in the same order for every architecture and seed, so a saved index tensor is a
+valid set of pool positions no matter which architecture produced it.
 
 Relation to analysis.score_subsets
 ──────────────────────────────────
@@ -73,14 +72,10 @@ def resolve_checkpoint_dir(template, seed):
     """Trajectory directory for one seed, tolerating a seedless template.
 
     The launchers point at ``.../<architecture>/checkpoints``, while the
-    per-seed trajectories live one level down; both spellings are accepted.
+    per-seed trajectories live one level down; both spellings are accepted,
+    and the per-seed directory wins over a stale manifest in the parent.
     """
-    directory = template.format(seed=seed)
-    if not os.path.isfile(os.path.join(directory, ref.MANIFEST_NAME)):
-        nested = os.path.join(directory, f'seed_{seed}')
-        if os.path.isdir(nested):
-            return nested
-    return directory
+    return ref.locate_seed_dir(template, seed)
 
 
 def build_scorer(cfg, args, seed, target_architecture, logger):
@@ -96,7 +91,7 @@ def build_scorer(cfg, args, seed, target_architecture, logger):
         resolve_checkpoint_dir(template, seed), optimizer=args.weighting,
         num_checkpoints=args.num_checkpoints, selection=args.checkpoint_selection,
         epochs=args.checkpoint_epochs, n_train=n_train,
-        batch_size=args.batch_size, base_lr=args.base_lr,
+        batch_size=args.reference_batch_size, base_lr=args.base_lr,
         num_epochs=cfg['num_epochs'], beta1=args.beta1,
         momentum=args.momentum_response, metric=args.metric,
         checkpoint_weighting=args.checkpoint_weighting,
@@ -378,7 +373,12 @@ def main(argv=None):
     p.add_argument('--n_random', default=3, type=int,
                    help='Fresh random subsets per (seed, budget) for the E_U[D] '
                         'reference, redrawn under every target trajectory.')
-    p.add_argument('--batch_size', default=256, type=int)
+    p.add_argument('--batch_size', default=256, type=int,
+                   help='Batch size of the scoring sweeps only.')
+    p.add_argument('--reference_batch_size', default=128, type=int,
+                   help='Batch size the reference trajectories were TRAINED with '
+                        '(scripts/slurm/run_full_data.sh uses 128). Independent of '
+                        '--batch_size.')
     p.add_argument('--num_workers', default=4, type=int)
     p.add_argument('--gbar_cache_dir', default=None)
     p.add_argument('--out_csv', default=None,

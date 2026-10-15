@@ -425,9 +425,15 @@ CHECKPOINT_DIR=/path/to/adam_checkpoints OPTIMIZER=adam METRIC=adam \
 
 ## Reproducibility notes
 
-- Use the same `--seed` for the 90/10 split, selection, and retraining.
+- Selection, retraining and scoring all use the whole training set as the pool (no
+  train/val split). Use the same `--seed` for the reference trajectory, selection,
+  and retraining.
 - New trajectory manifests store and consumers verify a hash of the ordered
-  pool indices; a seed label alone is not accepted as proof of split identity.
+  pool indices; a seed label alone is not accepted as proof of pool identity. A
+  trajectory trained before the split was removed (a 45,000-image pool) is rejected,
+  so retrain it with `scripts/slurm/run_full_data.sh`. Scoring takes the trajectory's
+  training batch size from `--reference_batch_size` (default 128), separate from the
+  scoring `--batch_size`.
 - Use the same `--scoring_transform` for every method. `test` gives a stable,
   unaugmented scoring view; `train` reproduces the earlier runs.
 - Prefer `--checkpoint_selection spread`; `prefix` intentionally reproduces the

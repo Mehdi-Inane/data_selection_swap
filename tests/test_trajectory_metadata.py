@@ -142,5 +142,80 @@ class TrajectoryMetadataTests(unittest.TestCase):
         )
 
 
+    @staticmethod
+    def _write_trajectory(root, *, pool_hash, n_train, batch_size=10):
+        """One-checkpoint SGD manifest, enough for ``resolve`` to run end to end."""
+        open(os.path.join(root, 'checkpoint_001.pth'), 'wb').close()
+        steps_per_epoch = -(-n_train // batch_size)
+        manifest = {
+            'optimizer': 'sgd', 'dataset': 'cifar10', 'architecture': 'resnet18',
+            'seed': 42, 'num_epochs': 1, 'batch_size': batch_size,
+            'n_train': n_train, 'steps_per_epoch': steps_per_epoch,
+            'epoch_lrs': [0.1], 'pool_indices_sha256': pool_hash,
+            'checkpoints': [{'file': 'checkpoint_001.pth',
+                             'step': steps_per_epoch, 'epoch': 1, 'lr': 0.1}],
+        }
+        with open(os.path.join(root, trajectory.MANIFEST_NAME), 'w') as fh:
+            json.dump(manifest, fh)
+
+    def test_full_pool_hash_rejects_a_trajectory_from_the_old_90_percent_split(self):
+        # The old pool was a 45,000-image random_split; the pool is now the
+        # whole training set. A trajectory carrying the old hash must be refused
+        # rather than scored against the wrong pool.
+        full_pool = common.ordered_indices_fingerprint(range(8))
+        old_split = common.ordered_indices_fingerprint([0, 1, 2, 4, 5, 6, 7])
+        self.assertNotEqual(full_pool, old_split)
+        with tempfile.TemporaryDirectory() as root:
+            self._write_trajectory(root, pool_hash=old_split, n_train=7)
+            with self.assertRaisesRegex(ValueError, 'pool_indices_sha256'):
+                trajectory.resolve(
+                    root, optimizer='uniform', num_checkpoints=1,
+                    n_train=8, batch_size=10, num_epochs=1,
+                    expected_dataset='cifar10', expected_seed=42,
+                    expected_architecture='resnet18',
+                    expected_pool_indices_sha256=full_pool)
+
+    def test_resolve_checks_the_training_batch_size_not_the_scoring_one(self):
+        # score_subsets scores with batch 256 but the reference was trained with
+        # 128; the trajectory check must be driven by the latter.
+        pool = common.ordered_indices_fingerprint(range(8))
+        with tempfile.TemporaryDirectory() as root:
+            self._write_trajectory(root, pool_hash=pool, n_train=8, batch_size=128)
+            kwargs = dict(optimizer='uniform', num_checkpoints=1, n_train=8,
+                          num_epochs=1, expected_dataset='cifar10',
+                          expected_seed=42, expected_architecture='resnet18',
+                          expected_pool_indices_sha256=pool)
+            trajectory.resolve(root, batch_size=128, **kwargs)
+            with self.assertRaisesRegex(ValueError, 'batch_size'):
+                trajectory.resolve(root, batch_size=256, **kwargs)
+
+
+class LocateSeedDirTests(unittest.TestCase):
+    def test_a_seed_template_is_filled_in(self):
+        self.assertEqual(
+            trajectory.locate_seed_dir('/a/checkpoints/seed_{seed}', 43),
+            '/a/checkpoints/seed_43')
+
+    def test_a_seedless_directory_descends_to_the_seed_child(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, 'seed_42'))
+            self.assertEqual(trajectory.locate_seed_dir(root + os.sep, 42),
+                             os.path.join(root + os.sep, 'seed_42'))
+
+    def test_the_seed_child_beats_a_stale_parent_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, trajectory.MANIFEST_NAME), 'w') as fh:
+                fh.write('{}')
+            os.makedirs(os.path.join(root, 'seed_42'))
+            self.assertEqual(trajectory.locate_seed_dir(root, 42),
+                             os.path.join(root, 'seed_42'))
+
+    def test_a_lone_parent_manifest_is_still_used_when_there_is_no_seed_child(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, trajectory.MANIFEST_NAME), 'w') as fh:
+                fh.write('{}')
+            self.assertEqual(trajectory.locate_seed_dir(root, 42), root)
+
+
 if __name__ == '__main__':
     unittest.main()
