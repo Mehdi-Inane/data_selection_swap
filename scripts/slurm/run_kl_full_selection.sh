@@ -56,7 +56,7 @@ SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 if [ "$VARIANT" = adam ]; then
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 else
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}}"
 fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
