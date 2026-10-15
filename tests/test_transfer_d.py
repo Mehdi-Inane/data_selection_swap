@@ -122,13 +122,23 @@ class CheckpointDirTest(unittest.TestCase):
             self.assertEqual(transfer_d.resolve_checkpoint_dir(tmp, 42),
                              str(Path(tmp) / 'seed_42'))
 
-    def test_a_directory_holding_the_manifest_is_used_as_is(self):
+    def test_a_directory_holding_only_the_manifest_is_used_as_is(self):
+        from data_selection_swap import trajectory as ref
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ref.MANIFEST_NAME).write_text('{}', encoding='utf-8')
+            self.assertEqual(transfer_d.resolve_checkpoint_dir(tmp, 42), tmp)
+
+    def test_the_per_seed_child_beats_a_stale_parent_manifest(self):
+        # A trajectory.json left directly in checkpoints/ by an older
+        # (90%-split) run must not shadow the seed_<seed> trained on the full pool.
         from data_selection_swap import trajectory as ref
 
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ref.MANIFEST_NAME).write_text('{}', encoding='utf-8')
             (Path(tmp) / 'seed_42').mkdir()
-            self.assertEqual(transfer_d.resolve_checkpoint_dir(tmp, 42), tmp)
+            self.assertEqual(transfer_d.resolve_checkpoint_dir(tmp, 42),
+                             str(Path(tmp) / 'seed_42'))
 
 
 class WriteTest(unittest.TestCase):

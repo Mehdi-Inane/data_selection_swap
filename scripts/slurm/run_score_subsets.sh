@@ -67,10 +67,22 @@ SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
-if [ ! -d "$CHECKPOINT_DIR" ]; then
-    echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
-    exit 1
+# Reference trajectories are trained per seed into <CHECKPOINT_DIR>/seed_<seed>
+# (scripts/slurm/run_full_data.sh) on the whole training set. Pass the scorer an
+# explicit per-seed template, and fail here rather than after staging the data
+# if a seed has no trajectory. CHECKPOINT_DIR may itself contain {seed}.
+if [[ "$CHECKPOINT_DIR" == *'{seed}'* ]]; then
+    CHECKPOINT_TEMPLATE="$CHECKPOINT_DIR"
+else
+    CHECKPOINT_TEMPLATE="${CHECKPOINT_DIR%/}/seed_{seed}"
 fi
+for seed in "${SEEDS[@]}"; do
+    seed_dir="${CHECKPOINT_TEMPLATE//\{seed\}/$seed}"
+    if [ ! -d "$seed_dir" ]; then
+        echo "Missing reference trajectory for seed ${seed}: $seed_dir" >&2
+        exit 1
+    fi
+done
 
 mkdir -p "$LOCAL_DATA" logs
 source "${SCRIPT_DIR}/stage_dataset.sh"
@@ -82,6 +94,10 @@ srun python "${PROJECT_ROOT}/scripts/analyze/score_subsets.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
     --data_dir "$LOCAL_DATA" \
+<<<<<<< ours
+=======
+    --checkpoint_dir "$CHECKPOINT_TEMPLATE" \
+>>>>>>> theirs
     --scratch "$SCRATCH_BASE" \
     --fractions "$FRACTION" \
     --seeds "${SEEDS[@]}" \
@@ -95,5 +111,6 @@ srun python "${PROJECT_ROOT}/scripts/analyze/score_subsets.py" \
     --n_random "${N_RANDOM:-3}" \
     --gbar_cache_dir "${SWAP_ROOT}/gbar_cache" \
     --batch_size 256 \
+    --reference_batch_size "${REFERENCE_BATCH_SIZE:-128}" \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --download

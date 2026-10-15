@@ -11,16 +11,17 @@ selection-rule-only experiment.
 
 | Component | Setting (source: `data_selection_swap.selection.kl`) |
 |---|---|
-| Data | Canonical comparison grid: CIFAR-10 / CIFAR-100, 90/10 train/val `random_split(seed)`; selection pool = the 90% split |
+| Data | Canonical comparison grid: CIFAR-10 / CIFAR-100, **no train/val split**; selection pool = the entire training set (`common.make_train_set`: 50,000 images, identical for every seed) |
 | Budgets | `fraction ∈ {0.1, 0.2, 0.4, 0.5}` of `n_train`, exact size `int(fraction · n_train)` |
-| Seeds | 42–46; the seed fixes the split, the method's randomness and the retrain init |
+| Seeds | 42–46; the seed fixes the reference trajectory, the method's randomness and the retrain init |
 | Architecture | Canonical grid: torchvision ResNet-18, VGG-16-BN, or GoogLeNet/Inception. ResNet-34, LeNet, and ConvNet remain available for mh-only controls. |
 | Retraining | Optimizer matched to the score (SGD for uniform/SGD, Adam for Adam), cosine schedule, 300 / 350 epochs, bs 128, unweighted CE |
 | Metric | Final-epoch top-1 test accuracy. Controlled drivers evaluate the official test set once per fit. |
 | Scoring view | `--scoring_transform` — same value for every method (see §4) |
 | Hardware | Same GPU type (`rtx8000`), 4 workers, one job per GPU |
 
-Every reference is seed matched to the split it represents. Its manifest stores
+Every reference is seed matched to the run it represents and trained on the full pool
+(`scripts/slurm/run_full_data.sh`, batch size 128). Its manifest stores
 the dataset, architecture, seed, schedule, initial-state fingerprint, and hash
 of the ordered pool indices; consumers reject any mismatch. Controlled
 retraining uses frozen indices, a byte-identical initialization for paired

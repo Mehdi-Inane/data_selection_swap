@@ -8,7 +8,7 @@ The factored selector restricts the gradient to the last layer, where
 g_i = vec(l_i phi_i^T) factorises and the kernel column P[:,i] costs
 O(n(C+F)). Nothing like that holds for the full network: convolutional
 per-sample gradients do not factorise, and storing G_t for ResNet-18 on
-CIFAR-100 would need 45000 x 11.2M x 4 B = 2 TB per checkpoint. P is not
+CIFAR-100 would need 50000 x 11.2M x 4 B = 2.2 TB per checkpoint. P is not
 available here, in any form, ever.
 
 It is not needed. Write u_I^k = sum_{i in I} g_i^k. Then
@@ -46,7 +46,7 @@ gradients only:
              costs nothing extra.
 
 Cost per iteration is therefore one forward pass over the pool per
-checkpoint: about 1760 batches at n = 45000, batch 256 and K = 10. The
+checkpoint: about 1960 batches at n = 50000, batch 256 and K = 10. The
 2000 single swaps alg3.sh asks for would take hours, so --max_iters
 defaults to 200 — which may well stop before the search settles, and is
 why the stopping reason, the final gradient gap and the best rejected

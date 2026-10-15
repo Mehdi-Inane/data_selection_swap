@@ -256,7 +256,7 @@ def main(argv=None):
                    choices=['resnet18', 'vgg16', 'inception'])
     p.add_argument('--fraction', default=0.1, type=float)
     p.add_argument('--seed', default=42, type=int,
-                   help='Split and selection seed whose subset is shown.')
+                   help='Selection seed whose subset is shown.')
     p.add_argument('--n_examples', default=N_EXAMPLES, type=int)
     p.add_argument('--example_seed', default=0, type=int,
                    help='RNG seed for which selected examples appear.')

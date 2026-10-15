@@ -22,8 +22,8 @@ Then
 Both terms are *aggregate* gradients, i.e. ordinary backward passes with
 reduction='sum'. Evaluating D therefore needs no per-sample gradients, no
 n x n Gram matrix, and no random projection — just T * (m/n)
-epoch-equivalents of backward. At CIFAR-100 scale (n=45000, T=10,
-m=13500) that is a few tens of seconds per subset, versus 2 TB per
+epoch-equivalents of backward. At CIFAR-100 scale (n=50000, T=10,
+m=15000) that is a few tens of seconds per subset, versus 2 TB per
 checkpoint to store the gradients P would be built from.
 
 Conventions
@@ -171,7 +171,14 @@ class TrajectoryScorer:
                 'size': stat.st_size,
                 'mtime_ns': stat.st_mtime_ns,
             })
+        # The cached gbar_t is a mean over the pool, so the pool is part of the
+        # key: a cache written for an old 90% split must never be reused for
+        # the full training set, even if a checkpoint path were recycled.
+        pool_indices = getattr(trainset, 'indices', None)
+        pool_fingerprint = (common.ordered_indices_fingerprint(pool_indices)
+                            if pool_indices is not None else None)
         self.trajectory_id = common.config_fingerprint({
+            'pool_indices_sha256': pool_fingerprint,
             'checkpoints': ckpt_identity,
             'weights': [float(w) for w in self.weights],
             'architecture': cfg.get('architecture'),

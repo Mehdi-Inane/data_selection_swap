@@ -441,17 +441,9 @@ def attach_cached_d(rows, path, scoring):
 
 
 def locate_checkpoint_dir(template, seed):
-    """Use the directory as given, or its ``seed_<seed>`` child when that is where the run lives."""
-    path = template.format(seed=seed)
-    manifest = os.path.join(path, 'trajectory.json')
-    if os.path.isfile(manifest):
-        return path
-    if os.path.basename(os.path.normpath(path)) == f'seed_{seed}':
-        return path
-    seeded = os.path.join(path, f'seed_{seed}')
-    if os.path.isdir(seeded):
-        return seeded
-    return path
+    """Reference trajectory directory for one seed (see ``trajectory.locate_seed_dir``)."""
+    from ..trajectory import locate_seed_dir
+    return locate_seed_dir(template, seed)
 
 
 def _plot(title, xlabel, ylabel, out_path, draw):
