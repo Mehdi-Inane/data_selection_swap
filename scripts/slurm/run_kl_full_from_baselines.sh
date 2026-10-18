@@ -54,11 +54,9 @@ METHOD=${METHODS[$IDX]}
 SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 BASE_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_baselines "$VARIANT")"
-if [ "$VARIANT" = adam ]; then
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
-else
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints}"
-fi
+# kl_full.py uses --checkpoint_dir verbatim (it does not descend into
+# seed_<seed> children), so point it at the seed-matched trajectory directly.
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
     INIT_CKPT_DIR="${SWAP_ROOT}/init"
