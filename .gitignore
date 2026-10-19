@@ -17,3 +17,9 @@ tmp/
 *.npy
 *.json
 !scripts/experiments/*.example.json
+
+# --- LLM instruction-tuning experiments (isolated; see docs/llm_less_protocol.md) ---
+vendor/
+requirements-llm.txt.lock
+llm_store/
+selected_data/

@@ -1,0 +1,35 @@
+# LLM instruction-tuning selection experiments (LESS-style).
+# SEPARATE environment from the CV experiments (requirements.txt is untouched).
+#
+#   conda create -n llm_select python=3.10 -y
+#   conda activate llm_select
+#   pip install -r requirements-llm.txt
+#   pip install -e .   # reuse the same data-selection-swap package
+#
+# The selector itself only needs torch (already in the CV env). Everything else
+# here is for Phase 0: running LESS's warm-up / gradient extraction / eval, and
+# the modern baselines.
+
+# --- core selector (torch only) ---
+torch>=2.0
+numpy
+
+# --- LESS pipeline (warmup LoRA, per-example gradients, eval) ---
+transformers>=4.40
+peft>=0.10
+datasets>=2.18
+accelerate>=0.28
+sentencepiece
+protobuf
+bitsandbytes>=0.43        # optional, for quantized warmup
+rank_bm25>=0.2            # BM25 baseline
+scikit-learn>=1.3         # DSIR / RDS baselines, metrics
+
+# --- evaluation harness (open-instruct based, as LESS does) ---
+# installed from source in Phase 0:
+#   pip install git+https://github.com/allenai/open-instruct.git
+# (pin the commit LESS used once reproduction targets are frozen)
+
+# --- modern baselines ---
+# INFLUEN2 and IFD/Cherry-LLM are vendored/run externally in vendor/; see
+# docs/llm_less_protocol.md. Their extra deps are added here once wired up.
