@@ -183,6 +183,31 @@ class TrajectoryFeatures:
         return out
 
     # -- linear score from a target gradient ------------------------------
+    def _normalize_vec(self, x: torch.Tensor) -> torch.Tensor:
+        """Row-normalize a ``[V, d]`` or ``[d]`` target under the active mode."""
+        x = x.to(torch.float64)
+        single = x.dim() == 1
+        m = x.reshape(1, -1) if single else x
+        if self.normalize == "l2":
+            m = m / m.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        return m.reshape(-1) if single else m
+
+    def cos_scores(self, checkpoint: int, targets: torch.Tensor) -> torch.Tensor:
+        """``[n, V]`` similarity of every example to ``V`` target gradients at one
+        checkpoint. With ``normalize="l2"`` this is the cosine similarity LESS uses;
+        ``targets`` may be a single ``[d]`` vector or a ``[V, d]`` stack (the ``V``
+        validation examples of one subtask)."""
+        feats = self.features[checkpoint]
+        if self.metrics[checkpoint].values is not None:
+            feats = feats * self.metrics[checkpoint].values.sqrt()
+            feats = feats / feats.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        t = self._normalize_vec(targets)
+        if t.dim() == 1:
+            t = t.reshape(1, -1)
+        if self.metrics[checkpoint].values is not None:
+            t = t / t.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        return feats @ t.t()
+
     def linear_score(self, targets: Sequence[torch.Tensor]) -> torch.Tensor:
         """``c_x = sum_k w_k <Phi_k[x], target_k>_k`` for a single target per checkpoint."""
         if len(targets) != len(self.features):

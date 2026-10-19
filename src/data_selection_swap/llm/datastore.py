@@ -31,16 +31,33 @@ from .features import TrajectoryFeatures
 
 MANIFEST_NAME = "manifest.json"
 
+#: Subtask counts used by LESS ``matching.py`` to reshape flattened validation
+#: gradients (``authoritative for the released data layout``).
+N_SUBTASKS = {"mmlu": 57, "bbh": 27, "tydiqa": 9}
 
-def _provenance(files: Sequence[str], weights: Sequence[float], normalize: str) -> str:
+
+def _provenance(root: str, weights: Sequence[float], normalize: str) -> str:
+    """Hash every stored feature/gradient ``.pt`` byte plus weights/normalize.
+
+    Walks ``features/`` and ``val/`` so tampering with any checkpoint, task or
+    subtask file is detected on load, independent of file ordering.
+    """
     h = hashlib.sha256()
     h.update(normalize.encode())
     for w in weights:
         h.update(repr(float(w)).encode())
         h.update(b"\x00")
-    for path in sorted(files):
+    tracked = []
+    for sub in ("features", "val"):
+        base = os.path.join(root, sub)
+        for dirpath, _, files in os.walk(base):
+            for f in files:
+                if f.endswith(".pt"):
+                    tracked.append(os.path.join(dirpath, f))
+    for path in sorted(tracked):
         st = os.stat(path)
-        h.update(f"{os.path.basename(path)}\t{st.st_size}\t{st.st_mtime_ns}".encode())
+        rel = os.path.relpath(path, root)
+        h.update(f"{rel}\t{st.st_size}\t{st.st_mtime_ns}".encode())
         h.update(b"\n")
     return h.hexdigest()
 
@@ -91,7 +108,7 @@ class FeatureStore:
             "checkpoint_names": self.checkpoint_names,
             "normalize": self.normalize,
             "validation_tasks": sorted(self.validation),
-            "provenance": self.provenance or _provenance(files, self.weights, self.normalize),
+            "provenance": self.provenance or _provenance(root, self.weights, self.normalize),
         }
         with open(os.path.join(root, MANIFEST_NAME), "w") as fh:
             json.dump(manifest, fh, indent=2)
@@ -123,9 +140,7 @@ class FeatureStore:
                     train_features=feats, validation=validation,
                     normalize=manifest["normalize"], provenance=manifest["provenance"], pool=pool)
         stored = manifest["provenance"]
-        recomputed = _provenance(
-            [os.path.join(root, "features", f"{name}.pt") for name in names],
-            manifest["weights"], manifest["normalize"])
+        recomputed = _provenance(root, manifest["weights"], manifest["normalize"])
         if stored and stored != recomputed:
             raise ValueError(
                 f"feature-store provenance mismatch ({stored[:8]}... != {recomputed[:8]}...): "
@@ -162,3 +177,107 @@ def make_synthetic_store(n=200, d=32, checkpoints=4, tasks=("tydiqa", "bbh"),
     records = [{"id": i, "text": f"example {i}"} for i in range(n)] if pool else None
     return FeatureStore(n=n, weights=weights, checkpoint_names=names, train_features=feats,
                         validation=validation, normalize=normalize, pool=records)
+
+
+def _load_dim_dir(dirpath: str) -> torch.Tensor:
+    """Load one LESS ``.../dim{D}`` directory as a float64 ``[N, d]`` tensor.
+
+    Prefers ``all_orig.pt`` (already row-normalized by LESS), then
+    ``all_unormalized.pt``, then merges the raw ``grads-{count}.pt`` shards in
+    index order — the same three states LESS leaves on disk.
+    """
+    all_orig = os.path.join(dirpath, "all_orig.pt")
+    if os.path.exists(all_orig):
+        return torch.load(all_orig, map_location="cpu").to(torch.float64)
+    all_un = os.path.join(dirpath, "all_unormalized.pt")
+    if os.path.exists(all_un):
+        return torch.load(all_un, map_location="cpu").to(torch.float64)
+    shards = [f for f in os.listdir(dirpath)
+              if f.startswith("grads-") and f.endswith(".pt")]
+    if not shards:
+        raise FileNotFoundError(
+            f"no all_orig.pt / all_unormalized.pt / grads-*.pt under {dirpath}")
+    shards.sort(key=lambda x: int(x.split(".")[0].split("-")[1]))
+    parts = [torch.load(os.path.join(dirpath, s), map_location="cpu") for s in shards]
+    return torch.cat(parts, dim=0).to(torch.float64)
+
+
+def load_from_less(
+    dim: int,
+    ckpts: Sequence[int],
+    checkpoint_weights: Sequence[float],
+    train_file_names: Sequence[str],
+    train_grad_template: str,
+    tasks: Sequence[str],
+    val_grad_template: str,
+    n_subtasks: Optional[Dict[str, int]] = None,
+    pool_files: Optional[Dict[str, str]] = None,
+) -> "FeatureStore":
+    """Ingest LESS Step-2/Step-3 gradient dumps into a :class:`FeatureStore`.
+
+    Templates mirror LESS ``matching.sh`` path conventions (formatted per
+    checkpoint):
+      ``train_grad_template`` with ``{name}``/``{ckpt}``/``{dim}``, e.g.
+        ``"{grad_root}/{name}-ckpt{ckpt}-adam/dim{dim}"``
+      ``val_grad_template`` with ``{task}``/``{ckpt}``/``{dim}``, e.g.
+        ``"{grad_root}/{task}-ckpt{ckpt}-sgd/dim{dim}"``
+
+    The pool is the concatenation of ``train_file_names`` in the given order
+    (per-file row counts are preserved so selected indices map back to records).
+    Validation gradients ``[N_valid, d]`` are reshaped to
+    ``(n_subtasks[task], V, d)`` and stored per subtask, so the selector computes
+    LESS's mean-over-val-examples / max-over-subtasks score exactly.
+    """
+    if len(ckpts) != len(checkpoint_weights):
+        raise ValueError("ckpts and checkpoint_weights must match in length")
+    total = float(sum(checkpoint_weights))
+    if total <= 0:
+        raise ValueError("checkpoint_weights must sum to a positive value")
+    weights = [float(w) / total for w in checkpoint_weights]  # LESS renormalizes too
+
+    names = [f"ckpt{c}" for c in ckpts]
+    train_features: List[torch.Tensor] = []
+    per_file_counts: List[List[int]] = []
+    for k, c in enumerate(ckpts):
+        blocks, counts = [], []
+        for name in train_file_names:
+            block = _load_dim_dir(train_grad_template.format(name=name, ckpt=c, dim=dim))
+            blocks.append(block)
+            counts.append(block.shape[0])
+        per_file_counts.append(counts)
+        train_features.append(torch.cat(blocks, dim=0))
+
+    n = train_features[0].shape[0]
+    width = train_features[0].shape[1]
+    for f in train_features:
+        if f.shape != (n, width):
+            raise ValueError("every checkpoint must produce the same pool size and width")
+
+    validation: Dict[str, List[List[torch.Tensor]]] = {}
+    n_subtasks = n_subtasks or {}
+    for task in tasks:
+        ns = n_subtasks.get(task, N_SUBTASKS.get(task))
+        if ns is None:
+            raise ValueError(f"unknown subtask count for task {task!r}; pass n_subtasks")
+        by_ckpt = []
+        for c in ckpts:
+            mat = _load_dim_dir(val_grad_template.format(task=task, ckpt=c, dim=dim))
+            if mat.shape[0] % ns != 0:
+                raise ValueError(
+                    f"{task} validation rows {mat.shape[0]} not divisible by "
+                    f"n_subtasks={ns}")
+            v = mat.shape[0] // ns
+            by_ckpt.append(mat.reshape(ns, v, width))
+        # validation[task][subtask][ckpt] -> [V, width]
+        validation[task] = [[by_ckpt[k][s] for k in range(len(ckpts))] for s in range(ns)]
+
+    pool = None
+    if pool_files:
+        pool = []
+        for name in train_file_names:
+            with open(pool_files[name]) as fh:
+                pool.extend(json.loads(line) for line in fh if line.strip())
+
+    return FeatureStore(n=n, weights=weights, checkpoint_names=names,
+                        train_features=train_features, validation=validation,
+                        normalize="l2", pool=pool)

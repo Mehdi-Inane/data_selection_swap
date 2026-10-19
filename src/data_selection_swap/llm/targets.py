@@ -36,25 +36,32 @@ def targeted_score(
     subtask_targets: Sequence[Sequence[torch.Tensor]],
     aggregation: str = "max",
 ) -> torch.Tensor:
-    """Setting B linear score over one or more validation subtasks.
+    """Setting B linear score over one or more validation subtasks — LESS's score.
 
-    Parameters
-    ----------
-    subtask_targets:
-        ``subtask_targets[j][k]`` is the ``[d]`` mean validation gradient of
-        subtask ``j`` at checkpoint ``k``. A single subtask is just a length-1
-        outer list.
-    aggregation:
-        ``"max"`` (LESS's ``max_j``) or ``"mean"``.
+    ``subtask_targets[j][k]`` is the mean-gradient feature(s) of validation subtask
+    ``j`` at checkpoint ``k``: either a ``[d]`` vector or a ``[V, d]`` stack of the
+    subtask's validation examples. This reproduces LESS ``matching.py`` exactly::
+
+        score_i = agg_j  sum_k w_k · mean_v  cos(Phi_k[i], target_k^{(j,v)})
+
+    (mean over the ``V`` validation examples within a subtask, then ``max_j`` over
+    subtasks — with ``V = 1`` this is the single-vector special case).
     """
     if aggregation not in ("max", "mean"):
         raise ValueError(f"aggregation must be 'max' or 'mean', got {aggregation!r}")
     if len(subtask_targets) == 0:
         raise ValueError("subtask_targets must contain at least one subtask")
 
-    per_subtask = torch.stack(
-        [features.linear_score(targets) for targets in subtask_targets], dim=0)
-    return per_subtask.max(dim=0).values if aggregation == "max" else per_subtask.mean(dim=0)
+    per_subtask = []
+    for targets in subtask_targets:
+        if len(targets) != len(features.features):
+            raise ValueError("each subtask must provide one target vector per checkpoint")
+        s = torch.zeros(features.n, dtype=torch.float64)
+        for k, t in enumerate(targets):
+            s += features.weights[k] * features.cos_scores(k, t).mean(dim=1)
+        per_subtask.append(s)
+    stacked = torch.stack(per_subtask, dim=0)
+    return stacked.max(dim=0).values if aggregation == "max" else stacked.mean(dim=0)
 
 
 def build_score(

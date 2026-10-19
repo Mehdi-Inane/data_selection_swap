@@ -33,7 +33,7 @@ subset to LESS's independent top-k on the *same* influence score (`jaccard_vs_sw
 
 | Script | Purpose |
 |---|---|
-| `build_datastore.py` | Make a synthetic store (smoke); Phase 0 extends it to ingest LESS dumps. |
+| `build_datastore.py` | Make a synthetic store (smoke), or `--from-less` to ingest real LESS gradient dumps. |
 | `select_swap.py` | Faithful (A) or targeted (B) selection; writes indices/JSONL + diagnostics vs LESS. |
 | `select_baselines.py` | LESS top-k and random baselines, same output schema. |
 | `analyze_selection.py` | Aggregate many `diagnostics.json` into a table/CSV for budget curves. |
