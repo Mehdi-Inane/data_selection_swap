@@ -2,6 +2,7 @@
 
 This repository reproduces the experiments in
 [Towards Faithful Data Selection: Statistical Limits and Scalable Algorithms](docs/data_selection_manuscript.pdf) by Ahmed-Mehdi Inane*, Mahdi Haghifam*, Gintare Karolina Dziugaite, and Ioannis Mitliagkas.
+
 Gradient Swap selects a fixed-size training subset whose gradients stay close
 to the full-data gradients along a saved training trajectory. The subset is
 then evaluated by retraining a fresh model.
