@@ -338,3 +338,28 @@ documented in [scripts/experiments/README.md](scripts/experiments/README.md)
 and [scripts/experiments/README_D_CORRELATION.md](scripts/experiments/README_D_CORRELATION.md).
 The last-layer selector `scripts/select/kl.py` is also not the Gradient Swap
 used in Section 5.
+
+## Reproducibility notes
+
+- Selection, retraining and scoring all use the whole training set as the pool (no
+  train/val split). Use the same `--seed` for the reference trajectory, selection,
+  and retraining.
+- New trajectory manifests store and consumers verify a hash of the ordered
+  pool indices; a seed label alone is not accepted as proof of pool identity. A
+  trajectory trained before the split was removed (a 45,000-image pool) is rejected,
+  so retrain it with `scripts/slurm/run_full_data.sh`. Scoring takes the trajectory's
+  training batch size from `--reference_batch_size` (default 128), separate from the
+  scoring `--batch_size`.
+- Use the same `--scoring_transform` for every method. `test` gives a stable,
+  unaugmented scoring view; `train` reproduces the earlier runs.
+- Prefer `--checkpoint_selection spread`; `prefix` intentionally reproduces the
+  early-checkpoint experiments.
+- Keep `--checkpoint_weighting point` for the exact `eta_k` formulas above. Use
+  `window` only when treating a sparse checkpoint as representative of a range of
+  optimizer steps.
+- The files in `scripts/legacy/` are retained for provenance and are not part of
+  the maintained workflow.
+- Exact Algorithm 2 has quadratic worst-case pair count per iteration and can
+  be substantially slower than Algorithm 3. Use a small smoke configuration
+  before allocating the full grid; any positive `max_pairs` is reported as a
+  truncated, non-certifying search.

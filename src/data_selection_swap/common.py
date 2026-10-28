@@ -38,7 +38,7 @@ import torch.optim as optim
 import torchvision.datasets as datasets
 import torchvision.models as tv_models
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset
 
 from .paths import default_results_root, storage_variant, tree
 from torchvision.models.googlenet import BasicConv2d
@@ -407,7 +407,7 @@ def feature_dim(model: nn.Module) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data loaders — identical split logic/seed across every method
+# Data loaders — identical pool (the full training set) across every method
 # ─────────────────────────────────────────────────────────────────────────────
 def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'test') -> Subset:
     """
@@ -423,14 +423,23 @@ def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'test')
     return Subset(clean, trainset.indices)
 
 
+def make_train_set(cfg: dict) -> Subset:
+    """
+    The selection pool: the *entire* training set, no validation hold-out.
+
+    Returned as a ``Subset`` over ``range(len(full_train))`` so that every
+    consumer of ``.indices`` / ``.dataset`` keeps working; pool position i is
+    simply training example i. Selection and retraining never touch the test
+    set or any held-out split.
+    """
+    return Subset(cfg['full_train'], list(range(len(cfg['full_train']))))
+
+
 def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int,
                  scoring_transform: str = 'test'):
-    n_val   = int(0.1 * len(cfg['full_train']))
-    n_train = len(cfg['full_train']) - n_val
-    trainset, _ = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(seed),
-    )
+    # `seed` is kept for call-site compatibility; the pool no longer depends on it.
+    trainset = make_train_set(cfg)
+    n_train = len(trainset)
     # shuffle=False: sample i of eval_loader always corresponds to selected_indices[i]
     eval_loader = DataLoader(scoring_subset(cfg, trainset, scoring_transform),
                              batch_size=batch_size, shuffle=False,

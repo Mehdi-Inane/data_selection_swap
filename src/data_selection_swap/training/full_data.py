@@ -7,7 +7,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from .. import common
 from .. import trajectory
@@ -53,20 +53,15 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info(f"Dataset={args.dataset} | Saving checkpoints to: {args.save_dir}")
 
-    # ── 2. Data Preparation & Split ────────────────────────────────────────────
+    # ── 2. Data Preparation ────────────────────────────────────────────
     cfg = common.get_dataset_config(args.dataset, args.data_dir, download=args.download,
                                     architecture=args.architecture)
     full_train = cfg['full_train']
 
-    n_val   = 0
-    n_train = len(full_train) - n_val
-
-    # Ensure the exact same trainset is used to compute the trajectory
-    trainset, valset = random_split(
-        full_train,
-        [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed)
-    )
+    # The pool is the whole training set (no validation hold-out); the same
+    # pool is used by every selection method.
+    trainset = common.make_train_set(cfg)
+    n_train = len(trainset)
     pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
 
     trainloader = DataLoader(
@@ -158,8 +153,7 @@ def main():
         model.train()
         running_loss = 0.0
 
-        #save_this_epoch = epoch <= 10 or epoch % 10 == 0 or epoch == NUM_EPOCHS
-        save_this_epoch = True
+        save_this_epoch = epoch <= 10 or epoch % 10 == 0 or epoch == NUM_EPOCHS
         checkpoint_snapshot = None
         checkpoint_step = None
         for batch_index, (inputs, targets) in enumerate(trainloader):

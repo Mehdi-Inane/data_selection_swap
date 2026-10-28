@@ -27,7 +27,11 @@ OPTIMIZER="${OPTIMIZER:-sgd}"
 VARIANT="$(layout_variant "$OPTIMIZER")"
 LR="$(layout_retrain_lr "$OPTIMIZER")"
 
-source "${SCRIPT_DIR}/cluster_env.sh"
+module load miniconda/3
+CONDA_ENV="${CONDA_ENV:-kl_select}"
+set +u
+conda activate "$CONDA_ENV"
+set -u
 
 DATASET=cifar10
 ARCHITECTURE=resnet18
@@ -47,28 +51,23 @@ IDX=$SLURM_ARRAY_TASK_ID
 SEED=${SEEDS[$(( IDX % N_SEEDS ))]}; IDX=$(( IDX / N_SEEDS ))
 METHOD=${METHODS[$IDX]}
 
-SCRATCH_BASE="$RESULTS_ROOT"
+SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 BASE_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_baselines "$VARIANT")"
-if [ "$VARIANT" = adam ]; then
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
-    MISMATCH_ARGS=()
-else
-    # Appendix G.1: one seed-42 reference trajectory for every selection seed.
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_42}"
-    MISMATCH_ARGS=(--allow_manifest_mismatch)
-fi
+# kl_full.py uses --checkpoint_dir verbatim (it does not descend into
+# seed_<seed> children), so point it at the seed-matched trajectory directly.
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
     INIT_CKPT_DIR="${SWAP_ROOT}/init"
 fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then
-    echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
+    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
     exit 1
 fi
 
 N_FULL=50000
-N_TRAIN=$(( N_FULL - N_FULL / 10 ))
+N_TRAIN=$N_FULL   # whole training set, no validation hold-out
 BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
 INIT_INDICES="${BASE_ROOT}/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}/${METHOD}_${BUDGET}_indices.pt"
 if [ ! -s "$INIT_INDICES" ]; then
@@ -113,5 +112,4 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --init_indices "$INIT_INDICES" \
     --init_method "$METHOD" \
     "${RETRAIN_ARGS[@]}" \
-    "${INIT_ARGS[@]}" \
-    "${MISMATCH_ARGS[@]}"
+    "${INIT_ARGS[@]}"

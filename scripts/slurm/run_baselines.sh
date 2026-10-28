@@ -4,7 +4,7 @@
 #SBATCH --error=logs/baselines_%A_%a.txt
 #SBATCH --array=0-839                # 2 datasets × 3 archs × 7 methods × 4 fractions × 5 seeds
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1         # match run_kl_selection.sh for comparable timing
+#SBATCH --gres=gpu:rtx8000:1         # match run_kl_selection.sh for comparable timing
 #SBATCH --time=15:00:00
 #SBATCH --mem=48Gb
 
@@ -28,7 +28,11 @@ OPTIMIZER="${OPTIMIZER:-sgd}"
 VARIANT="$(layout_variant "$OPTIMIZER")"
 
 # ── Environment ──────────────────────────────────────────────────────────────
-source "${SCRIPT_DIR}/cluster_env.sh"
+module load miniconda/3
+CONDA_ENV="${CONDA_ENV:-kl_select}"
+set +u
+conda activate "$CONDA_ENV"
+set -u
 
 # ── Experiment Hyperparameters (identical to alg3.sh) ───────────────────────
 DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
@@ -92,7 +96,7 @@ case "$METHOD" in
 esac
 
 # ── Paths Configuration ──────────────────────────────────────────────────────
-SCRATCH_BASE="$RESULTS_ROOT"
+SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 BASE_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_baselines "$VARIANT")"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
@@ -104,7 +108,7 @@ case "$DATASET" in
     imagenet)         N_FULL=1281167 ;;
     *) echo "Cannot derive the training-pool size for dataset=$DATASET" >&2; exit 1 ;;
 esac
-N_TRAIN=$(( N_FULL - N_FULL / 10 ))
+N_TRAIN=$N_FULL   # whole training set, no validation hold-out
 BUDGET=$(python -c "print(int(float('${FRACTION}') * ${N_TRAIN}))")
 RESULT_DIR="${BASE_ROOT}/${METHOD}/${DATASET}/${ARCHITECTURE}/${BUDGET}/seed_${SEED}"
 RESULT_MODEL="${RESULT_DIR}/${METHOD}_${BUDGET}_model.pth"
@@ -117,13 +121,12 @@ fi
 if [ "$VARIANT" = adam ]; then
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 else
-    # Appendix G.1: one seed-42 reference trajectory for every selection seed.
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_42}"
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 mkdir -p "$LOCAL_DATA"
 if [ ! -d "$CHECKPOINT_DIR" ]; then
-    echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
+    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
     exit 1
 fi
 

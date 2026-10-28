@@ -29,7 +29,7 @@ from typing import Optional
 import torch.nn as nn
 import torch.optim as optim
 from dotmap import DotMap
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from cords.utils.data.dataloader.SL.adaptive import GradMatchDataLoader
 
@@ -144,9 +144,6 @@ def main() -> None:
                         'Omitting it makes OMP intractable on ResNet-18 and '
                         'causes selection quality to collapse below random at '
                         'small fractions.')
-    p.add_argument('--valid',         action='store_true', default=False,
-                   help='Match against validation gradients instead of training '
-                        'gradients (class-imbalance setting only).')
 
     args = p.parse_args()
     if not math.isfinite(args.fraction) or not 0.0 < args.fraction < 1.0:
@@ -175,9 +172,9 @@ def main() -> None:
     cfg = dict(cfg)
     cfg['num_epochs'] = NUM_EPOCHS
 
-    n_val   = int(0.1 * len(cfg['full_train']))
-    n_train = len(cfg['full_train']) - n_val
-    budget  = int(args.fraction * n_train)
+    trainset = common.make_train_set(cfg)
+    n_train  = len(trainset)
+    budget   = int(args.fraction * n_train)
 
     if args.output_dir:
         base_dir = resolve_base_dir(args.output_dir, args.dataset, budget, args.seed)
@@ -223,18 +220,9 @@ def main() -> None:
     WEIGHTS_SAVE_PATH = os.path.join(base_dir, f"gradmatch_{budget}_weights.pt")
     ADAPTIVE_METRICS_PATH = os.path.join(base_dir, f"gradmatch_{budget}_adaptive_metrics.json")
 
-    # ── 3. Reproducible train / val split ────────────────────────────────────
-    trainset, valset = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
-
+    # ── 3. Loaders (training set only; no validation split) ──────────────────
     trainloader = DataLoader(
         trainset, batch_size=BATCH_SIZE, shuffle=False,
-        pin_memory=(device == 'cuda'), num_workers=args.num_workers,
-    )
-    valloader = DataLoader(
-        valset, batch_size=BATCH_SIZE, shuffle=False,
         pin_memory=(device == 'cuda'), num_workers=args.num_workers,
     )
     testloader = DataLoader(
@@ -262,7 +250,7 @@ def main() -> None:
         'num_classes'    : NUM_CLASSES,
         'num_epochs'     : NUM_EPOCHS,
         'device'         : device,
-        'valid'          : args.valid,
+        'valid'          : False,   # never match against held-out data
         'fraction'       : args.fraction,
         'select_every'   : args.select_every,
         'kappa'          : args.kappa,
@@ -279,14 +267,14 @@ def main() -> None:
     logger.info(
         f"GradMatch dss_args: select_every={args.select_every}  "
         f"kappa={args.kappa}  lam={args.lam}  "
-        f"linear_layer={args.linear_layer}  isValid={args.valid}"
+        f"linear_layer={args.linear_layer}"
     )
 
     if device == 'cuda':
         torch.cuda.synchronize()
     selection_t0 = time.perf_counter()
     dataloader = GradMatchDataLoader(
-        trainloader, valloader, dss_args, logger,
+        trainloader, trainloader, dss_args, logger,  # CORDS requires a 'val' loader slot; unused because valid=False
         batch_size=BATCH_SIZE,
         shuffle=True,
         pin_memory=(device == 'cuda'),

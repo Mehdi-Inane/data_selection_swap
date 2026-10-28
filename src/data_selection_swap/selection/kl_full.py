@@ -8,7 +8,7 @@ The factored selector restricts the gradient to the last layer, where
 g_i = vec(l_i phi_i^T) factorises and the kernel column P[:,i] costs
 O(n(C+F)). Nothing like that holds for the full network: convolutional
 per-sample gradients do not factorise, and storing G_t for ResNet-18 on
-CIFAR-100 would need 45000 x 11.2M x 4 B = 2 TB per checkpoint. P is not
+CIFAR-100 would need 50000 x 11.2M x 4 B = 2.2 TB per checkpoint. P is not
 available here, in any form, ever.
 
 It is not needed. Write u_I^k = sum_{i in I} g_i^k. Then
@@ -46,7 +46,7 @@ gradients only:
              costs nothing extra.
 
 Cost per iteration is therefore one forward pass over the pool per
-checkpoint: about 1760 batches at n = 45000, batch 256 and K = 10. The
+checkpoint: about 1960 batches at n = 50000, batch 256 and K = 10. The
 2000 single swaps alg3.sh asks for would take hours, so --max_iters
 defaults to 200 — which may well stop before the search settles, and is
 why the stopping reason, the final gradient gap and the best rejected
@@ -81,13 +81,14 @@ exact best-swap search. The exact search needs the per-pair curvature
 """
 
 import argparse
+import glob
+import json
 import logging
 import math
 import os
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import random_split
 
 from .. import common
 from .. import objective as d_alpha
@@ -647,6 +648,95 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _retrain_only(cfg, trainset, device, args, base_dir, method, budget, K):
+    """Recover the retraining stage of a run interrupted after selection.
+
+    A sweep task can die (wall-clock kill, node failure, scratch outage)
+    after common.finish has saved *_indices.pt but before *_metrics.json
+    exists. retrain_on_subset resets the RNG immediately before model
+    construction and uses a dedicated loader generator, so retraining from
+    the saved indices reproduces the accuracy the interrupted run would
+    have reported; only the selection stage is redundant work, and the
+    recovered artifacts must land under the interrupted run's cfg hash.
+    """
+    pattern = os.path.join(base_dir, f"{method}_{budget}_K{K}_cfg*_indices.pt")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(
+            f"--retrain_only found no saved selection matching {pattern}. The "
+            "selection never finished; rerun without --retrain_only instead.")
+    if len(matches) > 1:
+        raise RuntimeError(
+            "--retrain_only is ambiguous: several runs of this cell have saved "
+            f"selections: {matches}. Resolve by hand.")
+    prefix = matches[0][:-len('_indices.pt')]
+    paths = dict(base_dir=base_dir,
+                 model=f"{prefix}_model.pth",
+                 indices=f"{prefix}_indices.pt",
+                 metrics=f"{prefix}_metrics.json",
+                 timing=f"{prefix}_timing.json",
+                 objective=f"{prefix}_objective.json",
+                 run=f"{prefix}_run.json")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(f"{prefix}_training.log"),
+                  logging.StreamHandler()],
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"--retrain_only: reusing saved selection {matches[0]}")
+
+    if os.path.exists(paths['metrics']):
+        logger.info(f"Retraining already complete: {paths['metrics']}")
+        return
+
+    recorded = {}
+    if os.path.exists(paths['run']):
+        with open(paths['run']) as fh:
+            recorded = json.load(fh)
+        if recorded.get('status') == 'complete':
+            raise RuntimeError(
+                f"{paths['run']} reports status 'complete' but {paths['metrics']} "
+                "is missing; investigate before retraining.")
+        arguments = (recorded.get('config') or {}).get('arguments') or {}
+
+        def _same(key, recorded_value):
+            current = getattr(args, key, None)
+            if key == 'init_ckpt':
+                current = os.path.realpath(current) if current else None
+            return recorded_value == current
+        drift = {key: {'interrupted_run': recorded_value,
+                       'this command': getattr(args, key, None)}
+                 for key, recorded_value in arguments.items()
+                 if key in ('seed', 'batch_size', 'lr', 'retrain_optimizer',
+                            'init_ckpt') and not _same(key, recorded_value)}
+        if drift:
+            raise RuntimeError(
+                "--retrain_only recipe differs from the interrupted run "
+                f"(interrupted vs this command): {drift}. Rerun must reproduce "
+                "the original retraining arguments exactly.")
+    else:
+        logger.warning(f"No {paths['run']} to check the original recipe "
+                       "against; retraining with the arguments given.")
+
+    selected = common.torch_load(paths['indices'], map_location='cpu')
+    if len(selected) != budget:
+        raise RuntimeError(
+            f"{paths['indices']} holds {len(selected)} indices, "
+            f"expected budget={budget}")
+    common.finish(cfg, trainset, selected, device, args, logger, paths)
+
+    artifacts = {'indices': paths['indices'], 'objective': paths['objective'],
+                 'timing': paths['timing'],
+                 'model': paths['model'], 'metrics': paths['metrics']}
+    common.atomic_json_dump(
+        {'schema_version': recorded.get('schema_version', 1),
+         'run_id': recorded.get('run_id'), 'status': 'complete',
+         'config': recorded.get('config'),
+         'retrained_from_saved_selection': True,
+         'artifacts': artifacts}, paths['run'])
+
+
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--fraction',       default=0.3,         type=float)
@@ -723,6 +813,12 @@ def main():
                    help="View the pool is scored through. Default 'test' (clean) so that "
                         'this and the last-layer selector score identical inputs.')
     p.add_argument('--selection_only', action='store_true', default=False)
+    p.add_argument('--retrain_only', action='store_true', default=False,
+                   help='Skip selection entirely and only run the retraining stage, '
+                        'reusing the *_indices.pt already saved in the run directory '
+                        '(recovery for runs interrupted after saving their selection). '
+                        'Excluded from the run fingerprint so the recovered '
+                        'artifacts keep the interrupted run\'s cfg hash.')
     p.add_argument('--proj_dim',       default=0,           type=int,
                    help='Count-sketch dimension for the full-network aggregates. '
                         '0 keeps the exact R^d vectors. 4096 is a practical size '
@@ -740,6 +836,9 @@ def main():
                         'and written into the filename as _from_<method> so the '
                         'warm start does not share a cold-start K cell.')
     args = p.parse_args()
+    if args.retrain_only and args.selection_only:
+        p.error('--retrain_only reruns the retraining stage; combining it with '
+                '--selection_only (which skips retraining) is contradictory.')
 
     common.set_seed(args.seed)
     use_metric = ref.resolve_metric(args.optimizer, args.metric)
@@ -754,18 +853,14 @@ def main():
     NUM_EPOCHS  = cfg['num_epochs']
     device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    n_val   = int(0.1 * len(cfg['full_train']))
-    n_train = len(cfg['full_train']) - n_val
+    trainset = common.make_train_set(cfg)
+    n_train  = len(trainset)
     budget  = int(args.fraction * n_train)
     if not 1 <= budget < n_train:
         raise ValueError(
             f"--fraction={args.fraction!r} gives budget={budget}; require "
             f"1 <= budget < n_train={n_train}."
         )
-    trainset, _ = random_split(
-        cfg['full_train'], [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
     pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)
 
     init_index = None
@@ -815,6 +910,9 @@ def main():
         method += f'_jl{args.proj_dim}'
     if args.init_method:
         method += f'_from_{args.init_method}'
+    if args.retrain_only:
+        _retrain_only(cfg, trainset, device, args, base_dir, method, budget, K)
+        return
     if manifest is not None:
         trajectory_identity = {
             'manifest_run_id': manifest.get('run_id'),
@@ -833,7 +931,11 @@ def main():
     run_config = {
         'schema_version': 2,
         'selector': 'kl_full_network',
-        'arguments': {**vars(args),
+        # --retrain_only is a recovery-mode flag, not part of the experiment:
+        # it must not shift the fingerprint, or recovered artifacts would miss
+        # the interrupted run's cfg hash.
+        'arguments': {**{key: value for key, value in vars(args).items()
+                         if key != 'retrain_only'},
                       'checkpoint_dir': os.path.realpath(args.checkpoint_dir),
                       'data_dir': os.path.realpath(args.data_dir),
                       'init_ckpt': (os.path.realpath(args.init_ckpt)

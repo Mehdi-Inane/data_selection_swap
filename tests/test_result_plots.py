@@ -16,7 +16,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             result_plots.mean_test_error({"50": 80.0, "100": 90.0}), 15.0)
 
     def test_baseline_and_kl_filenames_become_series(self):
-        budget = 4500  # 0.1 * 45000, the CIFAR-10 pool
+        budget = 5000  # 0.1 * 50000, the CIFAR-10 pool (no validation hold-out)
         with tempfile.TemporaryDirectory() as scratch:
             baseline = (Path(scratch) / "data_selection_baselines" / "random"
                         / "cifar10" / "resnet18" / str(budget) / "seed_42")
@@ -59,7 +59,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             scoring = result_plots.scoring_id(
                 "cifar10", "resnet18", "sgd", "auto", 0, "spread", "point",
                 "test", None)
-            rows = [dict(fraction=0.1, budget=4500, method="kl_faithful", k=None,
+            rows = [dict(fraction=0.1, budget=5000, method="kl_faithful", k=None,
                          seed=42, error=15.0, selection_s=12.5,
                          indices_path=str(Path(scratch) / "indices.pt"), d=1.25)]
             result_plots.write_table(path, rows, scoring, "cifar10", "resnet18")
@@ -81,13 +81,13 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
             path = str(Path(scratch) / "d_exact.csv")
             scoring = "cifar10|resnet18|unused"
             rows = [
-                dict(fraction=0.1, budget=4500, method="random", k=None,
+                dict(fraction=0.1, budget=5000, method="random", k=None,
                      seed=42, error=20.0, selection_s=1.0, indices_path="a", d=None),
-                dict(fraction=0.1, budget=4500, method="random", k=None,
+                dict(fraction=0.1, budget=5000, method="random", k=None,
                      seed=43, error=10.0, selection_s=3.0, indices_path="b", d=None),
-                dict(fraction=0.1, budget=4500, method="kl_faithful", k=10,
+                dict(fraction=0.1, budget=5000, method="kl_faithful", k=10,
                      seed=42, error=30.0, selection_s=5.0, indices_path="c", d=None),
-                dict(fraction=0.1, budget=4500, method="kl_faithful", k=10,
+                dict(fraction=0.1, budget=5000, method="kl_faithful", k=10,
                      seed=43, error=20.0, selection_s=7.0, indices_path="d", d=None),
             ]
             result_plots.write_table(path, rows, scoring, "cifar10", "resnet18")
@@ -143,7 +143,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
     def test_checkpoint_ablation_csv_matches_the_baseline_table(self):
         from data_selection_swap.analysis import checkpoint_ablation
 
-        budget = 4500
+        budget = 5000
         with tempfile.TemporaryDirectory() as scratch:
             for k, acc in ((1, 80.0), (10, 70.0)):
                 directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
@@ -178,7 +178,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
     def test_k_latex_table_reports_accuracy_by_architecture_and_k(self):
         from data_selection_swap.analysis import checkpoint_ablation
 
-        budget = 4500
+        budget = 5000
         with tempfile.TemporaryDirectory() as scratch:
             for seed, acc in ((42, 80.0), (43, 90.0)):
                 directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
@@ -202,7 +202,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
     def test_jl_ablation_keeps_exact_and_sketched_runs(self):
         from data_selection_swap.analysis import jl_ablation
 
-        budget = 4500
+        budget = 5000
         with tempfile.TemporaryDirectory() as scratch:
             for seed, exact, sketched in ((42, 80.0, 70.0), (43, 90.0, 70.0)):
                 directory = (Path(scratch) / "gradmatch_swap" / "cifar10" / "resnet18"
@@ -247,7 +247,7 @@ class ResultPlotDiscoveryTest(unittest.TestCase):
     def test_warmstart_pairs_keep_baseline_accuracy_and_cached_g(self):
         from data_selection_swap.analysis import baseline_warmstart
 
-        budget = 4500
+        budget = 5000
         with tempfile.TemporaryDirectory() as scratch:
             seed_dir = (Path(scratch) / "data_selection_baselines" / "herding"
                         / "cifar10" / "resnet18" / str(budget) / "seed_42")

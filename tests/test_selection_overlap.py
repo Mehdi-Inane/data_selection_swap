@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import random_split
 
 from data_selection_swap.analysis import comparison
 from data_selection_swap.analysis import selection_overlap as overlap
@@ -17,7 +16,7 @@ POOL = comparison.N_TRAIN[DATASET]
 
 
 def subset(architecture='resnet18', method='kl_faithful', k=10, seed=42,
-           fraction=0.1, indices=(0, 1, 2), budget=4500):
+           fraction=0.1, indices=(0, 1, 2), budget=5000):
     return dict(dataset=DATASET, architecture=architecture, fraction=fraction,
                 budget=budget, method=method, k=k, seed=seed,
                 indices_path=f'{method}.pt',
@@ -43,7 +42,7 @@ class KappaTest(unittest.TestCase):
         self.assertLess(overlap.kappa(100, 100, 0, 1000), 0.0)
 
     def test_equal_sizes_match_the_closed_form(self):
-        n, m, o = 45000, 4500, 1800
+        n, m, o = 50000, 5000, 2000
         f = m / n
         self.assertAlmostEqual(overlap.kappa(m, m, o, n), (o / m - f) / (1 - f))
 
@@ -63,9 +62,9 @@ class KappaTest(unittest.TestCase):
         self.assertEqual(np.argsort(kappas).tolist(), np.argsort(jaccards).tolist())
 
     def test_hypergeometric_sd_is_the_measurement_noise_scale(self):
-        # ~19 examples at the production pool and budget, as the docstring claims.
-        self.assertAlmostEqual(overlap.hypergeometric_sd(4500, 4500, 45000), 19.0,
-                               delta=1.0)
+        # ~20 examples at the production pool and budget, as the docstring claims.
+        self.assertAlmostEqual(overlap.hypergeometric_sd(5000, 5000, 50000), 20.1,
+                               delta=0.5)
 
 
 class StratifiedTest(unittest.TestCase):
@@ -93,27 +92,19 @@ class StratifiedTest(unittest.TestCase):
 
 
 class PoolMappingTest(unittest.TestCase):
-    def test_pool_indices_matches_a_real_random_split(self):
+    def test_pool_is_the_full_training_set_in_order(self):
         total = overlap.N_TOTAL[DATASET]
-        n_val = int(0.1 * total)
-        trainset, _ = random_split(
-            range(total), [total - n_val, n_val],
-            generator=torch.Generator().manual_seed(42))
         np.testing.assert_array_equal(
-            overlap.pool_indices(DATASET, 42), np.asarray(trainset.indices))
+            overlap.pool_indices(DATASET, 42), np.arange(total))
 
     def test_pool_size_agrees_with_the_comparison_table(self):
         for dataset in ('cifar10', 'cifar100', 'mnist'):
             self.assertEqual(overlap.pool_indices(dataset, 42).size,
                              comparison.N_TRAIN[dataset])
 
-    def test_different_seeds_index_different_images(self):
-        a = overlap.pool_indices(DATASET, 42)
-        b = overlap.pool_indices(DATASET, 43)
-        self.assertFalse(np.array_equal(a, b))
-        # Each pool holds 90% of the split, so they share roughly 81% of it.
-        shared = np.intersect1d(a, b).size
-        self.assertAlmostEqual(shared / a.size, 0.9, delta=0.02)
+    def test_pool_does_not_depend_on_the_seed(self):
+        np.testing.assert_array_equal(
+            overlap.pool_indices(DATASET, 42), overlap.pool_indices(DATASET, 43))
 
     def test_unknown_dataset_is_refused(self):
         with self.assertRaises(KeyError):
@@ -121,7 +112,7 @@ class PoolMappingTest(unittest.TestCase):
 
 
 class DiscoveryTest(unittest.TestCase):
-    budget = 4500
+    budget = 5000
 
     def _baseline_dir(self, scratch, method, architecture='resnet18', seed=42):
         return (Path(scratch) / 'data_selection_baselines' / method / DATASET /

@@ -86,11 +86,12 @@ from ..paths import default_results_root, tree
 
 import numpy as np
 
+# Selection pool = the full training set (no validation hold-out).
 N_TRAIN = {
-    'cifar10': 45000,
-    'cifar100': 45000,
-    'mnist': 54000,
-    'imagenet': 1281167 - int(0.1 * 1281167),
+    'cifar10': 50000,
+    'cifar100': 50000,
+    'mnist': 60000,
+    'imagenet': 1281167,
 }
 
 # Method label for the fresh random draws that estimate E_U[D]. They carry a D
@@ -252,7 +253,7 @@ class ObjectiveScorer:
     saved indices.pt against that cached trajectory. The factors for a
     given (seed, K) is reused across every fraction and every K-tagged
     method that shares it, since neither depends on the fraction/method —
-    only on the seed (it fixes the train/val split) and K (how many
+    only on the seed (it fixes the reference trajectory) and K (how many
     checkpoints feed the kernel).
     """
 
@@ -329,11 +330,7 @@ class ObjectiveScorer:
             return self._traj_cache[key]
 
         X, Y, n_train, pool_hash = self._pool(seed)
-        checkpoint_dir = self.checkpoint_dir.format(seed=seed)
-        if not os.path.isfile(os.path.join(checkpoint_dir, self.ref.MANIFEST_NAME)):
-            seeded = os.path.join(checkpoint_dir, f'seed_{seed}')
-            if os.path.isdir(seeded):
-                checkpoint_dir = seeded
+        checkpoint_dir = self.ref.locate_seed_dir(self.checkpoint_dir, seed)
         checkpoints, _, _ = self.ref.resolve(
             checkpoint_dir, optimizer='uniform',
             num_checkpoints=k or 0, selection='spread', n_train=n_train,

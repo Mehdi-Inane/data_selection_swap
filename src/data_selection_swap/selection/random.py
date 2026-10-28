@@ -1,4 +1,4 @@
-"""Uniform random subset under the shared protocol (same split, model,
+"""Uniform random subset under the shared protocol (same pool, model,
 retrain loop and output layout as every other method in this suite).
 """
 

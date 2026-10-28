@@ -15,12 +15,12 @@ o, so it ranks pairs identically and is carried only as a familiar number.
 
 Why the pool-relative indices can be intersected directly
 ─────────────────────────────────────────────────────────
-``common.make_loaders`` draws the train/val split from a generator seeded only
-by ``seed``; the architecture never enters. So at a fixed seed, index i means
-the same image for every architecture and every method, and the saved index
-tensors are directly comparable. Across *seeds* both the pool ordering and the
-pool membership change, so that contrast maps back to absolute dataset indices
-(``pool_indices``) and conditions on the two pools' intersection.
+The selection pool is the whole training set in its natural order
+(``common.make_train_set``); neither the architecture nor the seed enters. So
+index i means the same image for every architecture, method and seed, and the
+saved index tensors are directly comparable. ``pool_indices`` is therefore the
+identity map, kept so the cross-seed contrast still goes through absolute
+dataset indices, and conditioning on the two pools' intersection is a no-op.
 
 Three contrasts, all on the same kappa scale
 ────────────────────────────────────────────
@@ -35,8 +35,8 @@ doing no more than reseeding, and if the architecture kappa is far below it
 the architecture genuinely decides which examples are picked.
 
 No significance test is reported, on purpose. Overlap under independence is
-Hypergeometric with a standard deviation of ~19 examples at n = 45000,
-m = 4500, so every pair clears any p-value threshold by a wide margin while
+Hypergeometric with a standard deviation of ~20 examples at n = 50000,
+m = 5000, so every pair clears any p-value threshold by a wide margin while
 saying nothing about effect size. The hypergeometric sd is written to the CSV
 as the measurement-noise scale instead.
 
@@ -73,9 +73,9 @@ from .comparison import N_TRAIN, load_json, run_dir
 from .d_accuracy_scatter import expand_inputs
 from .result_plots import is_kl_method
 
-# Size of the untouched training split, before make_loaders holds out 10% for
-# validation. N_TRAIN is what remains, and the two are cross-checked in
-# pool_indices so a wrong entry here cannot silently shift every mapping.
+# Size of the training set. The selection pool is the whole training set, so
+# this must equal N_TRAIN; the two are cross-checked in pool_indices so a wrong
+# entry here cannot silently shift every mapping.
 N_TOTAL = {
     'cifar10': 50000,
     'cifar100': 50000,
@@ -117,24 +117,21 @@ CLOSEST_FIELDS = [
 def pool_indices(dataset, seed):
     """Absolute dataset indices behind pool-relative position 0..n_train-1.
 
-    Replicates ``torch.utils.data.random_split``, which permutes
-    ``range(n_total)`` with the supplied generator and hands the first chunk to
-    the train split. Reproducing it here keeps the whole analysis on CPU and
-    free of torchvision: the mapping depends on nothing but the dataset size
-    and the seed.
+    The pool is the full training set in its natural order
+    (``common.make_train_set``), so position i is dataset index i whatever the
+    seed. ``seed`` is kept so call sites need no change.
     """
     if dataset not in N_TOTAL:
         raise KeyError(f"No pool size recorded for dataset {dataset!r}; "
                        f"known: {sorted(N_TOTAL)}")
     n_total = N_TOTAL[dataset]
-    n_train = n_total - int(0.1 * n_total)
+    n_train = n_total
     if n_train != N_TRAIN[dataset]:
         raise AssertionError(
             f"N_TOTAL[{dataset!r}] = {n_total} implies a pool of {n_train}, but "
             f"analysis.comparison.N_TRAIN says {N_TRAIN[dataset]}. One of the two "
             f"is wrong, and every cross-seed index mapping depends on it.")
-    generator = torch.Generator().manual_seed(int(seed))
-    return torch.randperm(n_total, generator=generator)[:n_train].numpy()
+    return np.arange(n_total)
 
 
 def pool_labels(dataset, data_dir, seed):
@@ -513,12 +510,10 @@ def method_contrast(records, labels_by_seed=None, num_classes=None):
 def seed_contrast(records, logger=None):
     """Same architecture, same method, different seed — the reproducibility ceiling.
 
-    Two seeds index different pools, and their pools are not even the same set
-    of images: each holds 90% of the training split. Both selections are mapped
-    back to absolute dataset indices and restricted to the shared part of the
-    two pools, which is also what the chance level is computed against. Without
-    that conditioning the ~10% of each pool the other seed never saw would be
-    scored as disagreement.
+    All seeds share one pool (the full training set), so selections are
+    directly comparable. They are still mapped back to absolute dataset indices
+    and restricted to the shared part of the two pools, which is now the whole
+    pool.
     """
     logger = logger or logging.getLogger('selection_overlap')
     pools = {}

@@ -22,9 +22,9 @@ What is stored instead is the same identity after a count sketch
 Rows of ``P`` are positions in the seed's training pool, which is also
 the indexing of every ``*_indices.pt``.
 
-The kernel depends on the seed. Checkpoints live in ``seed_<seed>`` and
-the 90/10 split is drawn with that seed, so one ``(dataset, architecture)``
-job stores one file per seed.
+The kernel depends on the seed. Checkpoints live in ``seed_<seed>`` (the pool
+itself is the full training set for every seed), so one
+``(dataset, architecture)`` job stores one file per seed.
 """
 
 import argparse

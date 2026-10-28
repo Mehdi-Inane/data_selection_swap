@@ -197,6 +197,30 @@ def load_manifest(checkpoint_dir):
         return json.load(fh)
 
 
+def locate_seed_dir(template, seed):
+    """
+    Directory holding the reference trajectory for one seed.
+
+    ``template`` may contain ``{seed}``, may be the seedless ``.../checkpoints``
+    directory the launchers use, or may already be a ``seed_<seed>`` directory.
+
+    The per-seed child wins over a manifest sitting in the parent. References
+    are trained once per seed into ``checkpoints/seed_<seed>/``, so that child
+    is the exact match. A ``checkpoints/trajectory.json`` is a leftover from an
+    older single-trajectory layout, and from before the train/val split was
+    removed, so letting it take precedence silently scores a stale 90% pool.
+    Whichever directory is returned is still validated against the pool hash
+    by ``resolve``.
+    """
+    path = template.format(seed=seed)
+    if os.path.basename(os.path.normpath(path)) == f'seed_{seed}':
+        return path
+    seeded = os.path.join(path, f'seed_{seed}')
+    if os.path.isdir(seeded):
+        return seeded
+    return path
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Step / epoch / learning-rate bookkeeping
 # ─────────────────────────────────────────────────────────────────────────────

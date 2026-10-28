@@ -127,8 +127,7 @@ def main():
     num_epochs = args.num_epochs or cfg['num_epochs']
     lr = args.lr if args.lr is not None else (0.01 if args.optimizer == 'sgd' else 1e-3)
 
-    # Same split as every selection script, so the trajectory and the
-    # selection pool are the same 90%.
+    # Same pool as every selection script (the full training set).
     trainset, _, _, n_train = common.make_loaders(
         cfg, args.seed, args.batch_size, args.num_workers)
     pool_indices_sha256 = common.ordered_indices_fingerprint(trainset.indices)

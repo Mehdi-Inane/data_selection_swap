@@ -10,10 +10,6 @@
 
 set -euo pipefail
 
-# Figure 2 of the manuscript: full-network Gradient Swap at K=1.
-# Checkpoint counts other than 1 are Appendix J
-# (scripts/slurm/run_kl_full_selection_checkpoints.sh).
-
 # sbatch runs a spooled copy of this file, so locate the repo from the
 # submission directory rather than from BASH_SOURCE.
 PROJECT_ROOT="${PROJECT_ROOT:-$(git -C "${SLURM_SUBMIT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || true)}"
@@ -28,7 +24,11 @@ OPTIMIZER="${OPTIMIZER:-sgd}"
 VARIANT="$(layout_variant "$OPTIMIZER")"
 LR="$(layout_retrain_lr "$OPTIMIZER")"
 
-source "${SCRIPT_DIR}/cluster_env.sh"
+module load miniconda/3
+CONDA_ENV="${CONDA_ENV:-kl_select}"
+set +u
+conda activate "$CONDA_ENV"
+set -u
 
 DATASET_GRID="${DATASETS:-${DATASET_OVERRIDE:-cifar10 cifar100}}"
 ARCHITECTURE_GRID="${ARCHITECTURES:-${ARCHITECTURE:-resnet18 vgg16 inception}}"
@@ -51,22 +51,19 @@ FRACTION=${FRACTIONS[$(( IDX % N_FRACTIONS ))]}; IDX=$(( IDX / N_FRACTIONS ))
 ARCHITECTURE=${ARCHITECTURES[$(( IDX % N_ARCHITECTURES ))]}; IDX=$(( IDX / N_ARCHITECTURES ))
 DATASET=${DATASETS[$IDX]}
 
-SCRATCH_BASE="$RESULTS_ROOT"
+SCRATCH_BASE="${SCRATCH:-/home/mila/a/ahmedm/scratch}"
 SWAP_ROOT="$(layout_root "$SCRATCH_BASE" data_selection_swap "$VARIANT")"
 if [ "$VARIANT" = adam ]; then
     CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
-    MISMATCH_ARGS=()
 else
-    # Appendix G.1: one seed-42 reference trajectory for every selection seed.
-    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_42}"
-    MISMATCH_ARGS=(--allow_manifest_mismatch)
+    CHECKPOINT_DIR="${CHECKPOINT_DIR:-${SWAP_ROOT}/${DATASET}/${ARCHITECTURE}/checkpoints/seed_${SEED}}"
 fi
 LOCAL_DATA="${SLURM_TMPDIR:-./data}/${DATASET}_data"
 if [ -z "${INIT_CKPT_DIR+x}" ]; then
     INIT_CKPT_DIR="${SWAP_ROOT}/init"
 fi
 if [ ! -d "$CHECKPOINT_DIR" ]; then
-    echo "Missing reference trajectory: $CHECKPOINT_DIR" >&2
+    echo "Missing seed-matched reference trajectory: $CHECKPOINT_DIR" >&2
     exit 1
 fi
 
@@ -83,7 +80,7 @@ if [ -n "${RETRAIN_OPTIMIZER:-}" ]; then
     RETRAIN_ARGS=(--retrain_optimizer "$RETRAIN_OPTIMIZER")
 fi
 
-echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION seed=$SEED proj_dim=${PROJ_DIM:-0}"
+echo "Full-network KL: dataset=$DATASET architecture=$ARCHITECTURE fraction=$FRACTION seed=$SEED proj_dim=${PROJ_DIM:-0} checkpoint_dir=$CHECKPOINT_DIR"
 srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --dataset "$DATASET" \
     --architecture "$ARCHITECTURE" \
@@ -91,7 +88,7 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --data_dir "$LOCAL_DATA" \
-    --num_checkpoints "${NUM_CHECKPOINTS:-1}" \
+    --num_checkpoints "${NUM_CHECKPOINTS:-4}" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
     --optimizer "$OPTIMIZER" \
@@ -106,5 +103,4 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --proj_dim "${PROJ_DIM:-0}" \
     --proj_seed "${PROJ_SEED:-0}" \
     "${RETRAIN_ARGS[@]}" \
-    "${INIT_ARGS[@]}" \
-    "${MISMATCH_ARGS[@]}"
+    "${INIT_ARGS[@]}"

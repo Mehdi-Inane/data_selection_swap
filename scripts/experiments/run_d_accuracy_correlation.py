@@ -271,7 +271,8 @@ def build_data(common, args, *, scoring_transform: str = "test"):
 
 def reference_config(args, cfg, pool_hash: str, init_hash: str, epochs: int,
                      learning_rate: float, checkpoints: list[int], code: dict[str, Any]) -> dict[str, Any]:
-    pool_size = int(len(cfg["full_train"]) - int(0.1 * len(cfg["full_train"])))
+    # The pool is the whole training set (common.make_train_set): no hold-out.
+    pool_size = int(len(cfg["full_train"]))
     steps_per_epoch = int(math.ceil(pool_size / args.batch_size))
     return {
         "schema_version": 1,
