@@ -31,4 +31,7 @@ __all__ = [
     "swap",
     "scoring",
     "datastore",
+    "pipeline",
+    "plotting",
+    "correlation",
 ]

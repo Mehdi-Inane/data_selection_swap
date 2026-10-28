@@ -80,3 +80,15 @@ See the plan. `scoring.py` provides redundancy / Jaccard / Spearman diagnostics 
 LESS releases **no prebuilt gradient store** — warmup + per-example gradient extraction is the
 dominant cost, so build one store per (model, seed) and reuse it across every method, budget,
 task, and both settings.
+
+## Orchestration & analysis (`run_pipeline.py` + analyzers)
+
+`scripts/llm/run_pipeline.py` builds the whole stage plan from a `PipelineConfig` JSON
+(`scripts/llm/pipeline.example.json`): per seed → warmup → train grads (× ckpt × file) →
+validation grads (× ckpt × task) → `--from-less` ingest → select (swap + LESS + random) →
+LESS `lora_train.sh` → open-instruct `eval_*`. It **dry-runs by default** (`--list` /
+`--stage <substr>`) so the command plan is inspectable and stages are resumable; `--run`
+executes. Analysis: `analyze_selection.py` (flat table), `analyze_budget_curve.py` (accuracy
+or objective vs fraction → PNG), `analyze_d_accuracy.py` (Spearman score-vs-accuracy per
+method — the selection-quality study). All orchestration/plot deps are optional or shelled
+out to LESS; the `llm` package still imports only numpy/torch (enforced by `IsolationTest`).
