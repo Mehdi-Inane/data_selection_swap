@@ -21,7 +21,7 @@ dependencies = [
 # LESS-style LLM instruction-tuning selection (Phase 0+). Mirrors
 # requirements-llm.txt; see docs/llm_less_protocol.md.
 llm = [
-    "transformers>=4.40",
+    "transformers>=4.40,<5",  # LESS (2023-era) uses args removed in transformers v5
     "peft>=0.10",
     "datasets>=2.18",
     "accelerate>=0.28",
