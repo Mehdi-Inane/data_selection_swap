@@ -124,6 +124,8 @@ sbatch_args = { account = "def-ioannism" }
 [tool.cluv.clusters.trillium]
 sbatch_args = { account = "def-ioannism" }
 job_script_path = "scripts/job-trillium.sh"
+# Trillium's /home is unusable on compute nodes (uv cache fails there), so cache on $SCRATCH.
+env = { UV_CACHE_DIR = "$SCRATCH/uv-cache" }
 # $HOME isn't mounted on Trillium's compute nodes, so a job submitted from the default $HOME
 # location is rejected ("Job output requested to be written to a filesystem not available on
 # compute nodes"). Keep the project on $SCRATCH instead.
@@ -132,6 +134,7 @@ project_dir = "$SCRATCH/repos/cluv"
 [tool.cluv.clusters.trillium-gpu]
 sbatch_args = { account = "def-ioannism" }
 job_script_path = "scripts/job-trillium.sh"
+env = { UV_CACHE_DIR = "$SCRATCH/uv-cache" }
 project_dir = "$SCRATCH/repos/cluv"
 
 [tool.cluv.clusters.narval]
