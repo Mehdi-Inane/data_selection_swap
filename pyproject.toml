@@ -123,6 +123,7 @@ sbatch_args = { account = "def-ioannism" }
 
 [tool.cluv.clusters.trillium]
 sbatch_args = { account = "def-ioannism" }
+job_script_path = "scripts/job-trillium.sh"
 # $HOME isn't mounted on Trillium's compute nodes, so a job submitted from the default $HOME
 # location is rejected ("Job output requested to be written to a filesystem not available on
 # compute nodes"). Keep the project on $SCRATCH instead.
@@ -130,6 +131,7 @@ project_dir = "$SCRATCH/repos/cluv"
 
 [tool.cluv.clusters.trillium-gpu]
 sbatch_args = { account = "def-ioannism" }
+job_script_path = "scripts/job-trillium.sh"
 project_dir = "$SCRATCH/repos/cluv"
 
 [tool.cluv.clusters.narval]
