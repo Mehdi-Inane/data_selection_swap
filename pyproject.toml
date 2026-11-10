@@ -98,8 +98,12 @@ env = { UV_OFFLINE = "0", WANDB_MODE = "online", UV_PROJECT_ENVIRONMENT = "$SCRA
 # ("Submitting jobs from directories residing in /home is not permitted"), so the project lives on
 # $SCRATCH there instead of the default $HOME location.
 project_dir = "$SCRATCH/repos/cluv"
+# PAICE allocation (verified via sacctmgr assoc: aip-ioannism|killarney)
+sbatch_args = { account = "aip-ioannism" }
 
 [tool.cluv.clusters.vulcan]
+# PAICE allocation (verified via sacctmgr assoc: aip-ioannism|vulcan)
+sbatch_args = { account = "aip-ioannism" }
 
 [tool.cluv.clusters.rorqual]
 sbatch_args = { account = "rrg-bengioy-ad" }
