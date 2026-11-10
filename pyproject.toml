@@ -89,7 +89,7 @@ requeue = true
 
 [tool.cluv.clusters.mila]
 # Overrides specific to the Mila cluster.
-env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+env = { UV_OFFLINE = "0", WANDB_MODE = "online", UV_PROJECT_ENVIRONMENT = "$SCRATCH/venvs/data_selection_swap" }
 
 [tool.cluv.clusters.tamia]
 
