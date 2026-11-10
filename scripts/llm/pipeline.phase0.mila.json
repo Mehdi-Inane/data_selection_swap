@@ -18,7 +18,7 @@
   "warmup_pct": 0.05,
   "dim": 8192,
   "grad_type": "adam",
-  "ckpts": [105, 211, 317, 420],
-  "checkpoint_weights": [1.6877e-05, 1.2859e-05, 7.7030e-06, 2.5616e-06],
+  "ckpts": [423, 846, 1269, 1692],
+  "checkpoint_weights": [1.0, 1.0, 1.0, 1.0],
   "rule": "ranked"
 }
