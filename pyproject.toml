@@ -113,11 +113,12 @@ sbatch_args = { account = "rrg-bengioy-ad" }
 
 [tool.cluv.clusters.fir]
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-sbatch_args = { account = "rrg-bengioy-ad" }
+sbatch_args = { account = "def-ioannism" }
 
 [tool.cluv.clusters.nibi]
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-sbatch_args = { account = "rrg-bengioy-ad" }
+# minane is not on rrg-bengioy-ad; PI allocation is def-ioannism (verified 2026-11-10)
+sbatch_args = { account = "def-ioannism" }
 
 [tool.cluv.clusters.trillium]
 sbatch_args = { account = "rrg-bengioy-ad" }
