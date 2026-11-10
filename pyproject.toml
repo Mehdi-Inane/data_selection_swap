@@ -92,6 +92,9 @@ requeue = true
 env = { UV_OFFLINE = "0", WANDB_MODE = "online", UV_PROJECT_ENVIRONMENT = "$SCRATCH/venvs/data_selection_swap" }
 
 [tool.cluv.clusters.tamia]
+# PAICE allocation (verified via sacctmgr assoc: aip-ioannism|tamia).
+# PAICE rules: whole nodes (4 GPUs/job), >=1h jobs (5min tests), no internet on compute nodes.
+sbatch_args = { account = "aip-ioannism" }
 
 [tool.cluv.clusters.killarney]
 # Killarney refuses to run jobs whose submission directory is under /home
@@ -106,10 +109,8 @@ sbatch_args = { account = "aip-ioannism" }
 sbatch_args = { account = "aip-ioannism" }
 
 [tool.cluv.clusters.rorqual]
-sbatch_args = { account = "rrg-bengioy-ad" }
-# With more than one allocation on a cluster, `cluv submit rorqual` submits one job per allocation
-# and keeps the first one that starts, cancelling the others:
-# sbatch_args = [{ account = "rrg-bengioy-ad" }, { account = "def-bengioy" }]
+# RAC allocations def-ioannism_cpu/_gpu; the parent is accepted by sbatch (like on nibi/fir).
+sbatch_args = { account = "def-ioannism" }
 
 [tool.cluv.clusters.fir]
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
@@ -121,16 +122,16 @@ env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
 sbatch_args = { account = "def-ioannism" }
 
 [tool.cluv.clusters.trillium]
-sbatch_args = { account = "rrg-bengioy-ad" }
+sbatch_args = { account = "def-ioannism" }
 # $HOME isn't mounted on Trillium's compute nodes, so a job submitted from the default $HOME
 # location is rejected ("Job output requested to be written to a filesystem not available on
 # compute nodes"). Keep the project on $SCRATCH instead.
 project_dir = "$SCRATCH/repos/cluv"
 
 [tool.cluv.clusters.trillium-gpu]
-sbatch_args = { account = "rrg-bengioy-ad" }
+sbatch_args = { account = "def-ioannism" }
 project_dir = "$SCRATCH/repos/cluv"
 
 [tool.cluv.clusters.narval]
-# Mila doesn't have an allocation on Narval anymore.
-sbatch_args = { account = "def-bengioy" }
+# RAC allocations def-ioannism_cpu/_gpu (parent accepted by sbatch).
+sbatch_args = { account = "def-ioannism" }
