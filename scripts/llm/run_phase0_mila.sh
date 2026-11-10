@@ -20,7 +20,8 @@
 #      evaluation/open_instruct installed — see the protocol doc, Phase 0 step 5.
 #
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+# Under sbatch, $0 is a spool copy (not in the repo) — trust SLURM_SUBMIT_DIR when set.
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 
 export UV_PROJECT_ENVIRONMENT=/network/scratch/a/ahmedm/venvs/data_selection_swap
 export HF_HOME=/network/scratch/a/ahmedm/hf_cache
