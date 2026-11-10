@@ -8,6 +8,31 @@ version = "0.1.0"
 description = "Faithful data selection with trajectory-weighted gradient matching"
 readme = "README.md"
 requires-python = ">=3.9"
+# Core deps for the uv-managed (cluv) workflow: the gradient-swap selector core.
+# The CV pipeline keeps using conda + requirements.txt; do not port it here.
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "tqdm",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# LESS-style LLM instruction-tuning selection (Phase 0+). Mirrors
+# requirements-llm.txt; see docs/llm_less_protocol.md.
+llm = [
+    "transformers>=4.40",
+    "peft>=0.10",
+    "datasets>=2.18",
+    "accelerate>=0.28",
+    "sentencepiece",
+    "protobuf",
+    "bitsandbytes>=0.43",
+    "rank_bm25>=0.2",
+    "scikit-learn>=1.3",
+    "matplotlib",
+    "pandas",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -20,3 +45,87 @@ data-selection-kl-full = "data_selection_swap.selection.kl_full:main"
 data-selection-aggregate = "data_selection_swap.analysis.comparison:main"
 data-selection-score = "data_selection_swap.analysis.score_subsets:main"
 data-selection-plot-checkpoints = "data_selection_swap.analysis.checkpoint_ablation:main"
+
+[tool.cluv]
+# All variables below can be overridden per cluster (except data_source).
+
+# Job script to use by default when one isn't passed to the `submit` command, on all clusters.
+# Can also be overridden per job submission.
+job_script_path = "scripts/job.sh"
+
+# Where to store job results by default.
+results_path = "$SCRATCH/logs/gradmatch_selection"
+
+# On clusters, Cluv creates a symlink (a shortcut) in your project folder to the results_path dir.
+# This makes it easier to keep your project in $HOME and to see the results which are on $SCRATCH.
+results_symlink = "runs"
+
+## The path where the project should be replicated on remote clusters.
+# project_dir = "$HOME/<project_name>"
+
+## Where to read the data from when synchronizing data to all clusters.
+# data_source = "<cluster>:<dataset_path_on_the_cluster>"
+
+## Where the dataset should be replicated on all clusters.
+# datasets_path = "<path_to_copy_datasets_on_all_clusters>"
+
+[tool.cluv.env]
+# Environment variables applied when using Slurm commands on all clusters.
+# Assume that compute nodes don't have internet access by default. Override below when they do.
+UV_OFFLINE = "1"
+WANDB_MODE = "offline"
+
+[tool.cluv.local]
+# Settings (environment variables) applied when using cluv on a local machine (not on a Slurm cluster).
+# Fake "$SCRATCH" directory to use when not on a Slurm cluster.
+# This makes the examples runnable either from a laptop or from a Slurm cluster.
+env = { SCRATCH = "$HOME/scratch" }
+
+[tool.cluv.sbatch_args]
+# sbatch flags applied on all clusters. CLI-supplied flags take precedence.
+requeue = true
+
+###  --------------   Clusters Config   --------------  ###
+
+[tool.cluv.clusters.mila]
+# Overrides specific to the Mila cluster.
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+
+[tool.cluv.clusters.tamia]
+
+[tool.cluv.clusters.killarney]
+# Killarney refuses to run jobs whose submission directory is under /home
+# ("Submitting jobs from directories residing in /home is not permitted"), so the project lives on
+# $SCRATCH there instead of the default $HOME location.
+project_dir = "$SCRATCH/repos/cluv"
+
+[tool.cluv.clusters.vulcan]
+
+[tool.cluv.clusters.rorqual]
+sbatch_args = { account = "rrg-bengioy-ad" }
+# With more than one allocation on a cluster, `cluv submit rorqual` submits one job per allocation
+# and keeps the first one that starts, cancelling the others:
+# sbatch_args = [{ account = "rrg-bengioy-ad" }, { account = "def-bengioy" }]
+
+[tool.cluv.clusters.fir]
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+sbatch_args = { account = "rrg-bengioy-ad" }
+
+[tool.cluv.clusters.nibi]
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+sbatch_args = { account = "rrg-bengioy-ad" }
+
+[tool.cluv.clusters.trillium]
+sbatch_args = { account = "rrg-bengioy-ad" }
+# $HOME isn't mounted on Trillium's compute nodes, so a job submitted from the default $HOME
+# location is rejected ("Job output requested to be written to a filesystem not available on
+# compute nodes"). Keep the project on $SCRATCH instead.
+project_dir = "$SCRATCH/repos/cluv"
+
+[tool.cluv.clusters.trillium-gpu]
+sbatch_args = { account = "rrg-bengioy-ad" }
+project_dir = "$SCRATCH/repos/cluv"
+
+[tool.cluv.clusters.narval]
+# Mila doesn't have an allocation on Narval anymore.
+sbatch_args = { account = "def-bengioy" }

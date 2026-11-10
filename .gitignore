@@ -23,3 +23,6 @@ vendor/
 requirements-llm.txt.lock
 llm_store/
 selected_data/
+
+/runs
+slurm-*.out
