@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -197,4 +198,10 @@ def run_stages(stages: List[Stage], *, dry_run: bool = False, only: Optional[Lis
 def config_from_json(path: str) -> PipelineConfig:
     with open(path) as fh:
         raw = json.load(fh)
-    return PipelineConfig(**raw)
+    cfg = PipelineConfig(**raw)
+    # LESS stages run with cwd=vendor, so every path we pass them must be absolute.
+    overrides = {f: os.path.abspath(v) for f in
+                 ("vendor", "repo_root", "data_dir", "eval_data_dir",
+                  "grads_dir", "store_dir", "runs_dir")
+                 if (v := getattr(cfg, f))}
+    return dataclasses.replace(cfg, **overrides)
