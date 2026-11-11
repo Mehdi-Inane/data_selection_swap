@@ -143,4 +143,4 @@ project_dir = "$SCRATCH/repos/cluv"
 sbatch_args = { account = "def-ioannism" }
 
 [tool.uv.sources]
-traker = { git = "https://github.com/MadryLab/trak.git", rev = "v0.1.1" }
+traker = { git = "https://github.com/MadryLab/trak.git", rev = "v0.1.3" }
