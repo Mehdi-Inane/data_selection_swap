@@ -15,6 +15,7 @@ dependencies = [
     "numpy",
     "tqdm",
     "pyyaml",
+    "traker[llm]",
 ]
 
 [project.optional-dependencies]
@@ -140,3 +141,6 @@ project_dir = "$SCRATCH/repos/cluv"
 [tool.cluv.clusters.narval]
 # RAC allocations def-ioannism_cpu/_gpu (parent accepted by sbatch).
 sbatch_args = { account = "def-ioannism" }
+
+[tool.uv.sources]
+traker = { git = "https://github.com/MadryLab/trak.git", rev = "v0.1.1" }
