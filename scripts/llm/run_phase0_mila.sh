@@ -27,6 +27,13 @@ export UV_PROJECT_ENVIRONMENT=/network/scratch/a/ahmedm/venvs/data_selection_swa
 export HF_HOME=/network/scratch/a/ahmedm/hf_cache
 export HF_HUB_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+# Node-local private Arrow cache: concurrent jobs sharing the scratch
+# HF_DATASETS_CACHE corrupt each other's json->arrow builds (cf. Nov-11 cot/oasst1
+# failures: "Cannot find data file" / Remote I/O error). Rebuild is a few minutes.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    export HF_DATASETS_CACHE="/tmp/dscache-${USER}-${SLURM_JOB_ID}"
+    trap 'rm -rf "$HF_DATASETS_CACHE"' EXIT
+fi
 
 mkdir -p /network/scratch/a/ahmedm/less/{logs,runs,work}
 nvidia-smi || true
