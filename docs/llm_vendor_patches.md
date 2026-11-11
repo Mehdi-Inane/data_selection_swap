@@ -16,6 +16,15 @@ the checkout; re-clone = re-run these):
    avoids a wandb dependency and any network calls).
 4. **Optimizer file rename**: `get_info.py` now falls back to `optimizer.pt` when
    `optimizer.bin` is absent (HF Trainer renamed the artifact; needed for `--grad_type adam`).
+5. **Optimizer state re-keying**: `collect_grad_reps.prepare_optimizer_state` now maps the
+   integer-keyed `optimizer.pt["state"]` (modern Trainer) back to parameter names
+   (2023 `named_optimizer` format) via trainable-parameter order.
+6. **Projector kwargs**: dropped `max_batch_size=` from the projector construction in
+   `collect_grad_reps.py` — in trak v0.1.3 only `CudaProjector` accepts it, and the
+   `BasicProjector` fallback (used when the optional `fast_jl` CUDA extension is absent,
+   which is our case) rejects it. CudaProjector's default (32) is unaffected.
+7. **trak pin**: `llm` extra uses `traker @ git+.../trak@v0.1.3` (dist renamed at HEAD;
+   v0.1.3 = April 2023, the API generation LESS was written against; module remains `trak`).
 
 ## Measured settings (Pythia-410M, warmup 5%, 4 epochs, effective batch 128)
 
