@@ -25,6 +25,13 @@ the checkout; re-clone = re-run these):
    which is our case) rejects it. CudaProjector's default (32) is unaffected.
 7. **trak pin**: `llm` extra uses `traker @ git+.../trak@v0.1.3` (dist renamed at HEAD;
    v0.1.3 = April 2023, the API generation LESS was written against; module remains `trak`).
+8. **fp16 merge overflow**: `merge_and_normalize_info` now normalizes in fp32. `BasicProjector`
+   (no `fast_jl`) writes fp16 chunk rows with norms ~5e5 > fp16 max (65504); `F.normalize`
+   then produced `inf` denominators and silently zeroed the rows of `all_orig.pt`
+   (99.7-100% of train dumps, 31-45% of mmlu val — which made LESS's max-over-subtasks score
+   tie at exactly 0.0 and select identical subsets for all target tasks). Upstream LESS avoids
+   this via `CudaProjector`'s fp32 outputs. Fixed dumps by re-merging from intact `grads-*.pt`
+   chunks (no GPU re-run needed).
 
 ## Measured settings (Pythia-410M, warmup 5%, 4 epochs, effective batch 128)
 
