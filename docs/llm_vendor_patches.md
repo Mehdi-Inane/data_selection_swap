@@ -41,6 +41,10 @@ the checkout; re-clone = re-run these):
     The import is now `try/except ImportError: vllm = None`.
     (With 9-10 the eval stack needs only our venv plus `evaluate` + `openai`; the SQuAD
     metric is prefetched into `$HF_HOME` once for the offline compute nodes.)
+11. **evaluate>=0.4.1 squad schema**: `evaluation/eval/tydiqa/run_eval.py` now passes
+    references as `{text: [...], answer_start: [...]}` (dict-of-lists) — newer `evaluate`
+    rejects the original list-of-dicts with "Predictions and/or references don't match the
+    expected format". Metric semantics unchanged.
 
 ## Measured settings (Pythia-410M, warmup 5%, 4 epochs, effective batch 128)
 
