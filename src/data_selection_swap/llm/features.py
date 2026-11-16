@@ -155,9 +155,14 @@ class TrajectoryFeatures:
         for each requested ``x``.
         """
         if rows is None:
-            idx = torch.arange(self.n)
-        else:
-            idx = rows.to(torch.long)
+            # all rows: matvec directly against the stored matrices. Going through
+            # index_select(arange(n)) would copy every [n, d] matrix first (~n*d*8 B
+            # of pointless traffic per checkpoint per descent iteration).
+            out = torch.zeros(self.n, dtype=torch.float64)
+            for k in range(len(self.features)):
+                out += self.weights[k] * (self.features[k] @ A[k])
+            return out
+        idx = rows.to(torch.long)
         out = torch.zeros(idx.numel(), dtype=torch.float64)
         for k in range(len(self.features)):
             block = self.features[k].index_select(0, idx)

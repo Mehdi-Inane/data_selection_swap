@@ -100,9 +100,8 @@ def ranked_swap(objective: SwapObjective, m: int, *, max_iters: int = 2000,
     reason = "local_optimum"
 
     for iteration in range(1, max_iters + 1):
-        all_rows = torch.arange(n)
-        keragg = objective.features.kernel_dot(A, all_rows)      # sum over current I
-        benefit = objective.c - keragg / m                        # marginal include score
+        keragg = objective.features.kernel_dot(A)             # sum over current I, all rows
+        benefit = objective.c - keragg / m                    # marginal include score
         outside = _complement(sel, n)
 
         drop_order = sel[torch.argsort(benefit.index_select(0, sel))]
@@ -134,8 +133,14 @@ def ranked_swap(objective: SwapObjective, m: int, *, max_iters: int = 2000,
 
 
 def select(features: TrajectoryFeatures, setting: str, config: SelectionConfig,
-           subtask_targets: Optional[Sequence[Sequence[torch.Tensor]]] = None) -> SelectionResult:
-    """End-to-end selection: build ``c`` for the setting, then run the chosen rule."""
+           subtask_targets: Optional[Sequence[Sequence[torch.Tensor]]] = None,
+           init: Optional[torch.Tensor] = None) -> SelectionResult:
+    """End-to-end selection: build ``c`` for the setting, then run the chosen rule.
+
+    ``init`` optionally seeds the descent with a given subset (e.g. LESS top-k, for a
+    fair "LESS + de-redundancy" comparison; since only improving swaps are accepted,
+    ``f(init-LESS) <= f(LESS)`` holds by construction). ``None`` = random init.
+    """
     c = build_score(features, setting, subtask_targets=subtask_targets,
                     aggregation=config.aggregation)
     objective = SwapObjective(features, c)
@@ -143,7 +148,7 @@ def select(features: TrajectoryFeatures, setting: str, config: SelectionConfig,
     if config.rule == "ranked":
         return ranked_swap(objective, m, max_iters=config.max_iters,
                            block_size=config.block_size, tolerance=config.tolerance,
-                           seed=config.seed)
+                           seed=config.seed, init=init)
     return best_swap(objective, m, max_iters=config.max_iters,
                      block_size=config.block_size, tolerance=config.tolerance,
-                     seed=config.seed)
+                     seed=config.seed, init=init)
