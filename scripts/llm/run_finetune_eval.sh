@@ -32,7 +32,9 @@ MODEL="$HF_HOME/models/pythia-410m"
 sel="$ROOT/runs/pythia410m/select:${method}:${task}:p0.05:seed0"
 [[ "$method" == "swap" ]] && sel="$sel:initless"     # fair headline subset
 selected="$sel/selected.jsonl"
-[[ -f "$selected" ]] || { echo "missing $selected" >&2; exit 1; }
+if [[ "${SKIP_TRAIN:-0}" != "1" && ! -f "$selected" ]]; then
+    echo "missing $selected" >&2; exit 1
+fi
 
 job="pythia410m-lora-${method}-${task}-p0.05-seed0"
 
