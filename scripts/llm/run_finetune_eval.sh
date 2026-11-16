@@ -47,10 +47,12 @@ fi
 out_dir="$PWD/../out/$job"
 [[ -f "$out_dir/adapter_config.json" ]] || { echo "adapter not saved in $out_dir" >&2; exit 1; }
 
-# 2) evaluate on the selection task. eval.sh clobbers DATA_DIR with its author's
-#    path, so export ours only after sourcing the eval script.
+# eval.sh clobbers DATA_DIR with its author's path (referencing an unbound $n,
+# so source it with nounset off), and export ours only after sourcing.
 cd evaluation
+set +u
 source "eval_${task}.sh"
+set -u
 export DATA_DIR="$ROOT/DATA/eval"
 "eval_${task}" "$out_dir"
 "extract_${task}" "$out_dir" | tee "$out_dir/eval/${task}/score.txt"
