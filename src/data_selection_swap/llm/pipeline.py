@@ -156,7 +156,10 @@ def build_stages(cfg: PipelineConfig) -> List[Stage]:  # noqa: C901 - explicit l
                                 "--rule", cfg.rule]
                     stages.append(Stage(sel, argv, cfg.repo_root, requires=[store]))
 
-                    job = f"{os.path.basename(cfg.model.rstrip('/'))}-{_selection_name(cfg, method, task, budget)}-seed{seed}"
+                    # "lora" in the job name is load-bearing: eval's
+                    # load_hf_lm_and_tokenizer merges adapters only for such paths
+                    job = (f"{os.path.basename(cfg.model.rstrip('/'))}-lora-"
+                           f"{_selection_name(cfg, method, task, budget)}-seed{seed}")
                     train = f"train:{job}"
                     selected = os.path.join(cfg.runs_dir, sel, "selected.jsonl")
                     stages.append(Stage(train, [
@@ -166,8 +169,10 @@ def build_stages(cfg: PipelineConfig) -> List[Stage]:  # noqa: C901 - explicit l
                     for eval_task in cfg.tasks:
                         s = f"eval:{eval_task}:{job}"
                         script = f"eval_{eval_task}.sh"
+                        # eval.sh clobbers DATA_DIR with its author's path — export ours after sourcing
                         inner = (f"cd {os.path.join(cfg.vendor, 'evaluation')} && "
-                                 f"source {script} && eval_{eval_task} {cfg.vendor}/{cfg.less_out}/{job} && "
+                                 f"source {script} && export DATA_DIR={cfg.eval_data_dir} && "
+                                 f"eval_{eval_task} {cfg.vendor}/{cfg.less_out}/{job} && "
                                  f"extract_{eval_task} {cfg.vendor}/{cfg.less_out}/{job}")
                         stages.append(Stage(s, ["bash", "-lc", inner], cfg.vendor,
                                             env={"DATA_DIR": cfg.eval_data_dir}, requires=[train]))

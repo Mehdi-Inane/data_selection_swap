@@ -32,6 +32,15 @@ the checkout; re-clone = re-run these):
    tie at exactly 0.0 and select identical subsets for all target tasks). Upstream LESS avoids
    this via `CudaProjector`'s fp32 outputs. Fixed dumps by re-merging from intact `grads-*.pt`
    chunks (no GPU re-run needed).
+9. **eval without open-instruct**: `evaluation/eval/utils.py` top-level-imported
+   `open_instruct.finetune.encode_with_prompt_completion_format`; the import now falls back to
+   a verbatim local copy of that function (identical to LESS's own
+   `less/data_selection/get_training_dataset.py`).
+10. **eval without vllm**: `evaluation/eval/{tydiqa,bbh}/run_eval.py` top-level-imported
+    `vllm`, which is only used behind `--use_vllm` — a flag none of `eval_*.sh` passes.
+    The import is now `try/except ImportError: vllm = None`.
+    (With 9-10 the eval stack needs only our venv plus `evaluate` + `openai`; the SQuAD
+    metric is prefetched into `$HF_HOME` once for the offline compute nodes.)
 
 ## Measured settings (Pythia-410M, warmup 5%, 4 epochs, effective batch 128)
 
@@ -45,5 +54,7 @@ the checkout; re-clone = re-run these):
 - `llm` extra pins `transformers>=4.40,<5` (v5 removed `warmup_ratio`/`overwrite_output_dir`
   args LESS passes).
 - No deepspeed/open-instruct needed for warmup + gradient stages (`torchrun` + `python -m
-  less.data_selection.get_info` only). The final train/eval stages (`lora_train.sh`,
-  `evaluation/*.sh`) are the only places open-instruct enters — Phase 0 step 5.
+  less.data_selection.get_info` only). For the final train/eval stages, open-instruct stays
+  uninstalled too: its two uses (finetune encode import, vllm generation) are covered by
+  vendor patches 9-10. Eval *data* is what open-instruct's layout defines — download it once
+  with `scripts/llm/fetch_eval_data.sh` (MMLU + BBH + cot-prompts + TyDiQA originals).

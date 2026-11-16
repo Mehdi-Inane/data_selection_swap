@@ -57,9 +57,19 @@ f(I) = (1/m^2) Σ_{i,j∈I} K_ij − (2/m) Σ_{i∈I} c_i,   K_ij = Σ_k w_k ⟨
      --pool-files flan_v2=data/train/flan_v2.jsonl cot=data/train/cot.jsonl \
                   dolly=data/train/dolly.jsonl oasst1=data/train/oasst1.jsonl
    ```
-5. Reproduce **Random** and **LESS** (TyDiQA, BBH @ 5%, 3 seeds): select with
-   `select_baselines.py` → hand the `selected.jsonl` to LESS `lora_train.sh` + open-instruct
-   eval. **Gate:** within ±1–2 pts of the paper's Pythia rows; freeze into
+5. Accuracy gate — fine-tune + eval each selection (implemented):
+   ```bash
+   bash scripts/llm/fetch_eval_data.sh            # once, on a login node (eval data)
+   sbatch -p long -t 8:00:00 --mem=64G --cpus-per-task=8 --gres=gpu:l40s:1 \
+          --output=/network/scratch/a/ahmedm/less/logs/gate_%j.out \
+          scripts/llm/run_finetune_eval.sh <less|swap|random> <mmlu|tydiqa|bbh>
+   ```
+   Per job: LESS's own `lora_train.sh` on the run's `selected.jsonl` (adapter under
+   `vendor/out/<job>`; the job name must contain `lora` for eval to merge it), then
+   LESS's own `evaluation/eval_<task>.sh` (metrics in `<out>/eval/<task>/metrics.json`,
+   headline number tee'd to `score.txt`). `swap` consumes the fair `:initless`
+   selections; open-instruct itself stays uninstalled (vendor patches 9-10).
+   **Gate:** within ±1–2 pts of the paper's Pythia rows; freeze into
    `tests/llm/fixtures/less_targets.json`.
 
 ### Phase 1 — port correctness  [DONE, no GPU]
