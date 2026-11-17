@@ -5,11 +5,12 @@
 #
 #   sbatch -p long -t 8:00:00 --mem=64G --cpus-per-task=8 --gres=gpu:l40s:1 \
 #          --output=/network/scratch/a/ahmedm/less/logs/gate_%j.out \
-#          scripts/llm/run_finetune_eval.sh <less|swap|random> <mmlu|tydiqa|bbh>
+#          scripts/llm/run_finetune_eval.sh <less|swap|swaprand|random> <mmlu|tydiqa|bbh>
 #
-# swap uses the fair LESS-initialized selections (...:initless). The training
-# job name must contain "lora": eval's load_hf_lm_and_tokenizer only applies a
-# PEFT adapter when the model path contains "lora" (evaluation/eval/utils.py).
+# swap uses the fair LESS-initialized selections (...:initless); swaprand uses
+# the same descent started from a RANDOM subset (the original unconverged dirs).
+# The training job name must contain "lora": eval's load_hf_lm_and_tokenizer only
+# applies a PEFT adapter when the model path contains "lora" (evaluation/eval/utils.py).
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}"
 
@@ -24,12 +25,14 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     trap 'rm -rf "$HF_DATASETS_CACHE"' EXIT
 fi
 
-method="${1:?usage: $0 <less|swap|random> <mmlu|tydiqa|bbh>}"
-task="${2:?usage: $0 <less|swap|random> <mmlu|tydiqa|bbh>}"
+method="${1:?usage: $0 <less|swap|swaprand|random> <mmlu|tydiqa|bbh>}"
+task="${2:?usage: $0 <less|swap|swaprand|random> <mmlu|tydiqa|bbh>}"
 
 ROOT=/network/scratch/a/ahmedm/less
 MODEL="$HF_HOME/models/pythia-410m"
-sel="$ROOT/runs/pythia410m/select:${method}:${task}:p0.05:seed0"
+sel_method="$method"                  # swaprand reuses the swap descent dirs
+[[ "$method" == "swaprand" ]] && sel_method="swap"
+sel="$ROOT/runs/pythia410m/select:${sel_method}:${task}:p0.05:seed0"
 [[ "$method" == "swap" ]] && sel="$sel:initless"     # fair headline subset
 selected="$sel/selected.jsonl"
 if [[ "${SKIP_TRAIN:-0}" != "1" && ! -f "$selected" ]]; then
