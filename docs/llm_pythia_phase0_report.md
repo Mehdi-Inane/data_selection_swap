@@ -262,9 +262,9 @@ LESS's subset is *more* redundant than random on all three tasks.
    reported alongside it.
 4. **Single seed.** Phase-0 gate is reproduction, but all tables need ≥3 seeds before
    paper claims.
-5. ~~**Accuracy gate not run**~~ **RUN (§12)**: ordering reproduced on TyDiQA (the only
-   Pythia row the paper reports); absolutes +2–3 pts vs the single-seed paper row; SEED=3
-   control runs in flight.
+5. ~~**Accuracy gate not run**~~ **DONE (§12)**: TyDiQA ordering reproduced on every seed;
+   seed-3 like-for-like cells inside/near ±1–2 of the paper's single-seed row; 4-seed grid
+   shows both targeted selections (less, swap) beating both random-tier selections.
 6. **`fast_jl` extension unbuilt** — projection runs on the slower `BasicProjector`
    (~5.3 rows/s); building it would roughly halve the 28-dump gradient time on reruns
    (seeds 1–2) and switches chunks to fp32 upstream.
@@ -299,7 +299,7 @@ for t in mmlu tydiqa bbh; do
 # 3. red reduction = 1 − swap_redundancy/less_redundancy, straight from the same JSON keys.
 ```
 
-## 12. Accuracy gate (Phase-0 step 5, 2026-11-16)
+## 12. Accuracy gate (Phase-0 step 5, 2026-11-16/17)
 
 Does the whole stack — our warmup/gradient store/selections fed into **LESS's own**
 trainer (`lora_train.sh`) and **LESS's own** eval scripts — reproduce LESS's reported
@@ -325,22 +325,48 @@ Warmup-adapter smoke (no selection fine-tune): TyDiQA f1 10.32 / EM 4.17.
 **Gate vs the paper.** The paper's Pythia experiments (Table 12, App. D.5) exist **for
 TyDiQA only, single seed**: base 3.8, random-5% 7.8, LESS-410M→410M 9.4, full-100% 8.6 f1.
 
-- *Ordering:* **reproduced** — LESS > random ≫ no-FT on TyDiQA (ours 11.57 > 10.83 ≫ ~3.8).
-- *Absolute:* +2.2 (LESS) / +3.0 (random) pts vs the single-seed paper row — strictly
-  outside the ±1–2 tolerance, same direction. Paper rows carry no std (Llama-2 stds on
-  these metrics run 0.4–1.7); the LESS repo's own job names use seed 3 while we run seed 0,
-  so seed-3 TyDiQA fine-tunes of the same subsets are the control (jobs 11753111/12).
-  Our warmup checkpoint schedule also differs by necessity (measured epoch-end
-  {423, 846, 1269, 1692}, uniform weights — §9).
+- *Ordering:* **reproduced** — LESS > random ≫ no-FT on TyDiQA (every seed below agrees).
+- *Absolute (seed 0 only):* +2.2 (LESS) / +3.0 (random) pts vs the single-seed paper row —
+  outside the ±1–2 tolerance, which motivated the seed grid below. (Paper rows carry no
+  std; Llama-2 stds on these metrics run 0.4–1.7. Our warmup checkpoint schedule also
+  differs by necessity — measured epoch-end {423, 846, 1269, 1692}, uniform weights, §9.)
+
+**Fine-tune seed grid (2026-11-17).** Selections fixed at the seed-0 gradient store; only
+the FINE-TUNE seed varies (vendor patch #12). TyDiQA f1 (jobs 11753111–12, 11753190–97,
+11753201–04, 11753873; one torchrun rendezvous crash on cn-l008 cleanly retried):
+
+| method (selection init) | s0 | s1 | s2 | s3 | mean ± std |
+|---|---|---|---|---|---|
+| less | 11.57 | 11.34 | 11.93 | 9.82 | 11.16 ± 0.93 |
+| swap (= LESS) | 10.86 | 13.90 | 9.84 | 11.37 | **11.49 ± 1.73** |
+| random | 10.83 | 10.47 | 9.05 | 9.64 | 10.00 ± 0.81 |
+| swaprand (= random, 2k-iter unconverged) | 10.36 | 10.38 | 9.80 | 9.12 | 9.92 ± 0.59 |
+
+Fine-tune-seed noise is up to ±2 pts (within-method ranges 1.7–4.1) — single-cell
+comparisons are meaningless at this scale; per-seed deltas are the evidence:
+
+- **swap − random > 0 on all 4 seeds** (mean +1.50); **less − random > 0 on all 4** (mean +1.17).
+- **Init ablation: swap ≥ swaprand on all 4 seeds** (mean +1.57), while **swaprand ≈ random**
+  (mean −0.08, 1/4 wins): the same descent from a random init neither recovers nor harms
+  random (it is unconverged by design), but descent initialized *at LESS* converts its
+  objective gains (§8.4) into the best fine-tuning mean over both baselines.
+- swap vs less is NOT separated (+0.33 mean, 2/4 wins) — same targeted mixture, same tier.
+
+- *Seed-3 like-for-like gate* (the LESS repo's own job names use seed3): less 9.82 vs
+  paper 9.4 → **+0.4, inside ±1–2**; random 9.64 vs 7.8 → **+1.8, at the tolerance edge**.
+  The seed-0 miss (+2.2/+3.0) collapses to within/near tolerance at seed 3 — consistent
+  with a single-seed reference whose own noise (our per-method std ≈ 0.6–1.7) is the same
+  size as the discrepancy.
 - *MMLU/BBH:* the paper has **no Pythia rows** for these cells, so they cannot be gated.
-  Recorded honestly: at 410M, **random ≥ LESS on two of three tasks** — LESS itself shows
-  the weak target-selection signal at this scale (consistent with the paper headlining
+  Recorded honestly: at 410M, **random ≥ LESS on two of three tasks** at seed 0 — LESS itself
+  shows the weak target-selection signal at this scale (consistent with the paper headlining
   Llama-2-7B/13B/Mistral and its 410M TyDiQA margin being only +1.6).
 
-Frozen (with the paper row and verdict) in `tests/llm/fixtures/less_targets.json`.
+Frozen (paper row, 4-seed grid, verdict) in `tests/llm/fixtures/less_targets.json`.
 
-Verdict: **borderline pass** — pipeline validated end-to-end (trainer/eval reproduce the
-paper's qualitative TyDiQA signature on our own gradient store), absolutes within
-seed-noise distance of a single-seed reference. A strict pass on numbers requires the
-seed-3 control (in flight) and, for the paper's own numbers, more seeds than Phase-0 budgeted.
+Verdict: **pass, within honestly-stated single-seed noise** — TyDiQA ordering reproduces on
+every seed; the seed-3 like-for-like cells sit inside/near the ±1–2 band; and the 4-seed
+grid yields the first noise-resolved statement: the two targeted selections (less, swap)
+beat both random-tier selections (random, swaprand) on every fine-tune seed, with swap
+(initialized at LESS) the best mean.
 
