@@ -22,10 +22,13 @@ fi
 
 task="${1:?usage: $0 <task> (mmlu|tydiqa|bbh)}"
 MAX_ITERS="${MAX_ITERS:-13534}"   # = subset size m at fraction 0.05 of the 270,679 pool
+SEED="${SEED:-0}"                 # selection seed: seed 1 = store-seed1 -> ...:seed1:initless
 ROOT=/network/scratch/a/ahmedm/less
+store="$ROOT/work/pythia410m/store"
+[[ "$SEED" != "0" ]] && store="$store-seed$SEED"
 
 uv run --extra llm python scripts/llm/select_swap.py \
-    --store "$ROOT/work/pythia410m/store" \
-    --out "$ROOT/runs/pythia410m/select:swap:${task}:p0.05:seed0:initless" \
+    --store "$store" \
+    --out "$ROOT/runs/pythia410m/select:swap:${task}:p0.05:seed${SEED}:initless" \
     --setting targeted --task "$task" --fraction 0.05 \
     --rule ranked --max-iters "$MAX_ITERS" --init less

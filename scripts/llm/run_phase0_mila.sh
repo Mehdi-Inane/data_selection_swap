@@ -39,4 +39,4 @@ mkdir -p /network/scratch/a/ahmedm/less/{logs,runs,work}
 nvidia-smi || true
 
 uv run --extra llm python scripts/llm/run_pipeline.py \
-    --config scripts/llm/pipeline.phase0.mila.json "$@" --run
+    --config "${CONFIG:-scripts/llm/pipeline.phase0.mila.json}" "$@" --run

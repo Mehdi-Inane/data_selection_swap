@@ -32,7 +32,9 @@ ROOT=/network/scratch/a/ahmedm/less
 MODEL="$HF_HOME/models/pythia-410m"
 sel_method="$method"                  # swaprand reuses the swap descent dirs
 [[ "$method" == "swaprand" ]] && sel_method="swap"
-sel="$ROOT/runs/pythia410m/select:${sel_method}:${task}:p0.05:seed0"
+# SELECTION_SEED (env, default 0) picks the selection subset from a different
+# warmup/gradient-seed run (A2 robustness); fine-tune SEED stays independent.
+sel="$ROOT/runs/pythia410m/select:${sel_method}:${task}:p0.05:seed${SELECTION_SEED:-0}"
 [[ "$method" == "swap" ]] && sel="$sel:initless"     # fair headline subset
 selected="$sel/selected.jsonl"
 if [[ "${SKIP_TRAIN:-0}" != "1" && ! -f "$selected" ]]; then
@@ -42,6 +44,7 @@ fi
 # selection subsets are fixed at seed 0; SEED (env) varies the FINE-TUNE seed
 # only (vendor patch 12; default 0 = LESS's shipped value).
 job="pythia410m-lora-${method}-${task}-p0.05-seed${SEED:-0}"
+[[ "${SELECTION_SEED:-0}" != "0" ]] && job="$job-sel${SELECTION_SEED}"
 
 # 1) fine-tune with LESS's own defaults (less/scripts/train/base_training_args.sh)
 #    SKIP_TRAIN=1 re-evaluates an existing adapter (smoke tests, re-scores).
