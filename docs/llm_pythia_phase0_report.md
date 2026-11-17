@@ -213,6 +213,28 @@ the two recorded numbers — an exact decomposition is on the to-do list, §10.)
   descent explores exactly the axis the paper is about — trading influence for
   redundancy — *starting from LESS itself*, guaranteeing f(swap) ≤ f(LESS).
 
+### 8.4 Fair comparison: descent initialized at LESS (2026-11-16)
+
+§8.2/§8.3 compare a *converged* LESS top-k against an *unconverged, randomly-initialized*
+descent — an initialization advantage for LESS. The fair version starts the descent at
+LESS's own subset (`--init less`, cap `max_iters = m = 13,534`; `scripts/llm/run_swap_less_init.sh`,
+outputs under `runs/.../select:swap:<task>:p0.05:seed0:initless/`). Only improving swaps are
+accepted, so **f(swap) ≤ f(LESS) holds by construction** — the claim becomes "LESS's output is
+not redundancy-optimal: the same score, given set-level descent, strictly improves":
+
+| task | f(LESS) | f(swap after descent) | Δf | stop / accepted swaps | sec/iter | J(swap,LESS) | red LESS→swap |
+|---|---|---|---|---|---|---|---|
+| mmlu | −0.039326 | **−0.042104** | **−7.1%** | local_optimum / 3,554 | 1.43 | 0.586 | 0.00675 → 0.00391 (−42%) |
+| tydiqa | −0.047275 | **−0.049950** | **−5.7%** | local_optimum / 3,350 | 1.23 | 0.603 | 0.00840 → 0.00472 (−44%) |
+| bbh | −0.026205 | **−0.030002** | **−14.5%** | local_optimum / 4,602 | 1.71 | 0.493 | 0.00693 → 0.00249 (−64%) |
+
+All three converged *before* the cap (≈1.2–1.9 h wall each, vs 4.1–4.5 h for the old
+2,000-iteration runs — the copy-free full-pool `kernel_dot` made descent ~5× faster).
+Convergence curves: `history.json` next to each `diagnostics.json`. Baseline f/redundancy
+for all nine §8.2-era selections (including the random baseline, previously unscored):
+`runs/pythia410m/score_selections.json` (`scripts/llm/score_selections.py`); it also shows
+LESS's subset is *more* redundant than random on all three tasks.
+
 ## 9. Empirical choices, and why
 
 | Choice | Rationale |
@@ -232,20 +254,17 @@ the two recorded numbers — an exact decomposition is on the to-do list, §10.)
 
 ## 10. Limitations & next steps
 
-1. **Swap unconverged & randomly initialized → LESS wins f (§2, §8.3).** Next: add
-   `--init less` to `select_swap.py` (the solver API already accepts `init=`) and rerun;
-   raise `max_iters` (≥ 8000) to approach local optimum; report the descent curves
-   (`history` is already saved by the solver).
-2. **Random baseline has no recorded f/redundancy** (`select_baselines.py` writes thin
-   diagnostics). Fill in by scoring the existing `selected_indices.pt` under the same
-   objective — trivial once the store is loaded.
+1. ~~**Swap unconverged & randomly initialized → LESS wins f**~~ **DONE (§8.4)**:
+   `--init less`, cap raised to m; all tasks converge at local optimum with Δf −5.7…−14.5%.
+2. ~~**Random baseline has no recorded f/redundancy**~~ **DONE**: `scripts/llm/score_selections.py`
+   → `runs/pythia410m/score_selections.json`.
 3. **Redundancy is final-checkpoint only**; trajectory-weighted redundancy should be
    reported alongside it.
 4. **Single seed.** Phase-0 gate is reproduction, but all tables need ≥3 seeds before
    paper claims.
-5. **Accuracy gate not run.** 9 LoRA fine-tunes (3 tasks × {swap, less, random}) +
-   evals on L40S; needs LESS's `evaluation/open_instruct` installed (protocol doc,
-   Phase-0 step 5).
+5. ~~**Accuracy gate not run**~~ **RUN (§12)**: ordering reproduced on TyDiQA (the only
+   Pythia row the paper reports); absolutes +2–3 pts vs the single-seed paper row; SEED=3
+   control runs in flight.
 6. **`fast_jl` extension unbuilt** — projection runs on the slower `BasicProjector`
    (~5.3 rows/s); building it would roughly halve the 28-dump gradient time on reruns
    (seeds 1–2) and switches chunks to fp32 upstream.
@@ -279,4 +298,49 @@ for t in mmlu tydiqa bbh; do
 #     candidate for promotion to scripts/llm/analyze_phase0.py.)
 # 3. red reduction = 1 − swap_redundancy/less_redundancy, straight from the same JSON keys.
 ```
+
+## 12. Accuracy gate (Phase-0 step 5, 2026-11-16)
+
+Does the whole stack — our warmup/gradient store/selections fed into **LESS's own**
+trainer (`lora_train.sh`) and **LESS's own** eval scripts — reproduce LESS's reported
+fine-tuning results? Runner: `scripts/llm/run_finetune_eval.sh <method> <task>`
+(train + eval, `SKIP_TRAIN=1` re-eval mode; `SEED=<n>` env varies the fine-tune seed
+via vendor patch #12). Eval data: `scripts/llm/fetch_eval_data.sh` (MMLU 57 test files;
+BBH 27 tasks + 27 CoT prompts; TyDiQA goldp originals via Wayback — the GCS bucket
+403s since 2026-11). Eval stack needed vendor patches #9–11 (drop open-instruct/vllm
+imports, strict-`evaluate` squad schema); the SQuAD metric is prefetched into `$HF_HOME`
+for the offline compute nodes.
+
+**Seed-0 results** (jobs 11740319–28; fine-tune = 4 epochs LoRA r=128/α=512, eff. batch 32
+on the 13,534-row subsets; eval = LESS's `eval_<task>.sh` defaults):
+
+| task (metric) | LESS | swap (init=LESS) | random |
+|---|---|---|---|
+| MMLU (acc %) | 26.81 | 26.96 | **27.39** |
+| TyDiQA (f1) | **11.57** | 10.86 | 10.83 |
+| BBH (EM %) | 22.59 | 19.81 | **25.46** |
+
+Warmup-adapter smoke (no selection fine-tune): TyDiQA f1 10.32 / EM 4.17.
+
+**Gate vs the paper.** The paper's Pythia experiments (Table 12, App. D.5) exist **for
+TyDiQA only, single seed**: base 3.8, random-5% 7.8, LESS-410M→410M 9.4, full-100% 8.6 f1.
+
+- *Ordering:* **reproduced** — LESS > random ≫ no-FT on TyDiQA (ours 11.57 > 10.83 ≫ ~3.8).
+- *Absolute:* +2.2 (LESS) / +3.0 (random) pts vs the single-seed paper row — strictly
+  outside the ±1–2 tolerance, same direction. Paper rows carry no std (Llama-2 stds on
+  these metrics run 0.4–1.7); the LESS repo's own job names use seed 3 while we run seed 0,
+  so seed-3 TyDiQA fine-tunes of the same subsets are the control (jobs 11753111/12).
+  Our warmup checkpoint schedule also differs by necessity (measured epoch-end
+  {423, 846, 1269, 1692}, uniform weights — §9).
+- *MMLU/BBH:* the paper has **no Pythia rows** for these cells, so they cannot be gated.
+  Recorded honestly: at 410M, **random ≥ LESS on two of three tasks** — LESS itself shows
+  the weak target-selection signal at this scale (consistent with the paper headlining
+  Llama-2-7B/13B/Mistral and its 410M TyDiQA margin being only +1.6).
+
+Frozen (with the paper row and verdict) in `tests/llm/fixtures/less_targets.json`.
+
+Verdict: **borderline pass** — pipeline validated end-to-end (trainer/eval reproduce the
+paper's qualitative TyDiQA signature on our own gradient store), absolutes within
+seed-noise distance of a single-seed reference. A strict pass on numbers requires the
+seed-3 control (in flight) and, for the paper's own numbers, more seeds than Phase-0 budgeted.
 
