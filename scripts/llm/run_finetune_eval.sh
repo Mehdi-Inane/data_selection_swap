@@ -36,7 +36,9 @@ if [[ "${SKIP_TRAIN:-0}" != "1" && ! -f "$selected" ]]; then
     echo "missing $selected" >&2; exit 1
 fi
 
-job="pythia410m-lora-${method}-${task}-p0.05-seed0"
+# selection subsets are fixed at seed 0; SEED (env) varies the FINE-TUNE seed
+# only (vendor patch 12; default 0 = LESS's shipped value).
+job="pythia410m-lora-${method}-${task}-p0.05-seed${SEED:-0}"
 
 # 1) fine-tune with LESS's own defaults (less/scripts/train/base_training_args.sh)
 #    SKIP_TRAIN=1 re-evaluates an existing adapter (smoke tests, re-scores).

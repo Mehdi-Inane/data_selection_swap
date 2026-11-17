@@ -45,6 +45,9 @@ the checkout; re-clone = re-run these):
     references as `{text: [...], answer_start: [...]}` (dict-of-lists) — newer `evaluate`
     rejects the original list-of-dicts with "Predictions and/or references don't match the
     expected format". Metric semantics unchanged.
+12. **fine-tune seed via env**: `less/scripts/train/base_training_args.sh`: `--seed ${SEED:-0}`
+    (was `--seed 0`) so reproduction runs can vary the fine-tune seed without touching the
+    checkout; unset SEED reproduces the shipped behavior exactly.
 
 ## Measured settings (Pythia-410M, warmup 5%, 4 epochs, effective batch 128)
 

@@ -1,0 +1,37 @@
+{
+  "_doc": "Phase-0 accuracy-gate targets: LESS paper Pythia rows + our reproduction (protocol step 5). Paper numbers are TyDiQA-only (Table 12, App. D.5: Pythia experiments were run for TyDiQA with ONE seed; the paper reports no Pythia MMLU/BBH rows). Our runs: fine-tune seed 0 unless suffixed; selection fraction 0.05; eval = LESS's bundled open-instruct scripts.",
+  "paper": {
+    "source": "Xia et al., LESS (ICML 2024), Table 12 - TyDiQA-GoldP dev F1, single seed",
+    "url": "https://proceedings.mlr.press/v235/xia24c.html",
+    "pythia_410m": {
+      "base_no_ft": 3.8,
+      "random_5pct": 7.8,
+      "less_5pct_selected_by_410m": 9.4,
+      "less_5pct_selected_by_1b": 8.8,
+      "full_100pct": 8.6
+    },
+    "note": "No MMLU/BBH Pythia rows exist in the paper; those cells cannot be gated against it."
+  },
+  "ours_seed0": {
+    "date": "2026-11-16",
+    "warmup": "vendor/out/pythia-410m-warmup-p0.05-seed0 (5% random, 4 epochs, ckpts 423/846/1269/1692)",
+    "tydiqa_f1": {
+      "warmup_adapter_smoke": 10.322,
+      "random": 10.826,
+      "less": 11.566,
+      "swap_init_less": 10.857
+    },
+    "mmlu_acc": {"random": 27.389, "less": 26.812, "swap_init_less": 26.962},
+    "bbh_em":    {"random": 25.463, "less": 22.593, "swap_init_less": 19.815}
+  },
+  "gate_verdict": {
+    "ordering": "REPRODUCED - LESS > Random > no-FT on TyDiQA, same as paper (9.4 > 7.8 > 3.8)",
+    "absolute": "LESS +2.2 pts, Random +3.0 pts vs the single-seed paper row (outside the +/-1-2 tolerance, in the same direction)",
+    "hypotheses": [
+      "paper is single-seed without std; Llama-2 std on these metrics is 0.4-1.7",
+      "paper fine-tune/warmup seed likely 3 (repo job names use seed3); see SEED=3 rerun",
+      "our warmup checkpoint schedule differs by necessity: measured epoch-end {423,846,1269,1692}, uniform weights (docs/llm_vendor_patches.md)"
+    ],
+    "mmlu_bbh": "random > less at 410M on two of three tasks; no paper reference exists for these cells at 410M (the paper's headline results are Llama-2/Mistral). Recorded, not gated."
+  }
+}
