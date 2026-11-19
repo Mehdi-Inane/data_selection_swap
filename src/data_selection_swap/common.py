@@ -46,7 +46,7 @@ from .subsets import per_class_budget  # noqa: F401  (re-exported: common.per_cl
 from torchvision.models.googlenet import BasicConv2d
 
 DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet', 'cifar10_lt', 'cifar100_lt',
-            'cifar10_noisy20')
+            'cifar10_noisy20', 'cifar100_in1k')
 # CIFAR-10-LT / CIFAR-100-LT: the standard exponential profile with imbalance
 # ratio 50 (13,996 / 12,608 training images), one pool for every run.
 LONG_TAIL_RATIO = 50
@@ -59,6 +59,9 @@ ARCHITECTURES = (
     'resnet18', 'vgg16', 'inception',
     # Retained for the existing mh-only controlled experiments.
     'resnet34', 'lenet', 'convnet',
+    # torchvision ResNet-18 with its ImageNet-1k weights and a new classifier
+    # head, run at 224 px, for fine-tuning (with cifar100_in1k).
+    'resnet18_in1k',
 )
 # Backward-compatible default. New code should call ``feature_dim(model)``.
 FEAT_DIM = 512
@@ -291,6 +294,28 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
             testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
         )
 
+    if dataset == 'cifar100_in1k':
+        # CIFAR-100 for fine-tuning an ImageNet-1k network (resnet18_in1k):
+        # the CIFAR augmentation and 32-px images with ImageNet normalisation,
+        # which commutes with the bilinear upsampling to 224 px the network
+        # does on the device. The pool therefore stays CIFAR-sized for the
+        # selectors that hold it on the GPU. num_epochs is the short
+        # fine-tuning schedule.
+        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+        tf_tr = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(), transforms.Normalize(mean, std),
+        ])
+        tf_te = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
+        return dict(
+            dataset='cifar100_in1k', num_classes=100, num_epochs=10,
+            small_images=True, cifar_style=True, input_channels=3,
+            architecture=architecture,
+            full_train=datasets.CIFAR100(root=data_dir, train=True,  download=download, transform=tf_tr),
+            testset   =datasets.CIFAR100(root=data_dir, train=False, download=download, transform=tf_te),
+        )
+
     if dataset == 'mnist':
         mean, std = (0.1307,), (0.3081,)
         tf_tr = transforms.Compose([
@@ -347,6 +372,31 @@ def _torchvision_model(constructor, **kwargs):
         return constructor(pretrained=False, **kwargs)
 
 
+class UpsampledResNet18(tv_models.ResNet):
+    """torchvision ResNet-18 that bilinearly resizes its input to ``size`` px.
+
+    Same module layout and state-dict keys as ``torchvision.models.resnet18``,
+    so its ImageNet weights load as they are.
+    """
+
+    def __init__(self, size: int = 224, num_classes: int = 1000):
+        super().__init__(tv_models.resnet.BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+        self.size = size
+
+    def forward(self, x):
+        x = nn.functional.interpolate(x, size=(self.size, self.size), mode='bilinear',
+                                      align_corners=False)
+        return super().forward(x)
+
+
+def imagenet_resnet18_state_dict():
+    """torchvision's ImageNet-1k ResNet-18 weights (IMAGENET1K_V1), on both APIs."""
+    weights = getattr(tv_models, 'ResNet18_Weights', None)
+    if weights is not None:
+        return weights.IMAGENET1K_V1.get_state_dict(progress=False)
+    return tv_models.resnet18(pretrained=True).state_dict()
+
+
 def build_model(cfg: dict, num_classes: int, device: str,
                 architecture: str = None) -> nn.Module:
     """Build a supported network with a common ``linear`` classifier API."""
@@ -390,6 +440,16 @@ def build_model(cfg: dict, num_classes: int, device: str,
         elif in_channels != 3:
             model.conv1 = BasicConv2d(
                 in_channels, 64, kernel_size=7, stride=2, padding=3)
+    elif architecture == 'resnet18_in1k':
+        # The ImageNet stem and weights, at the 224 px they were trained at;
+        # inputs should carry ImageNet normalisation (cifar100_in1k). Only the
+        # classifier head is new, drawn from the current RNG state, so
+        # set_seed fixes it.
+        if in_channels != 3:
+            raise ValueError("resnet18_in1k takes RGB inputs.")
+        model = UpsampledResNet18(size=224)
+        model.load_state_dict(imagenet_resnet18_state_dict())
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
     elif architecture == 'resnet34':
         model = TorchvisionResNet(34, in_channels, num_classes, small_images)
     elif architecture == 'lenet':
@@ -934,7 +994,15 @@ def base_argparser(description: str):
                         "for every method in a comparison.")
     p.add_argument('--selection_only', action='store_true', default=False,
                    help='Stop after saving indices + timing (skip retraining).')
+    add_retrain_schedule_argument(p)
     return p
+
+
+def add_retrain_schedule_argument(p):
+    p.add_argument('--retrain_schedule', default='epochs', choices=['epochs', 'steps'],
+                   help="'epochs': the dataset's num_epochs passes over the subset. "
+                        "'steps': as many steps as the full-data reference, at its "
+                        "learning rate per step (for fine-tuning on small subsets).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -944,6 +1012,10 @@ def base_argparser(description: str):
 # so that accuracy differences trace back to `selected_indices` alone.
 # ─────────────────────────────────────────────────────────────────────────────
 def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, paths):
+    schedule = getattr(args, 'retrain_schedule', 'epochs')
+    if schedule == 'steps':
+        return _retrain_for_reference_steps(cfg, trainset, selected_indices, device, args,
+                                            logger, paths)
     train_generator = torch.Generator().manual_seed(int(args.seed) + 10_000)
     trainloader = DataLoader(
         Subset(trainset, selected_indices),
@@ -997,6 +1069,89 @@ def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, pat
             logger.info(f"Epoch {epoch:03d}/{cfg['num_epochs']} | "
                         f"Test Acc: {acc:.2f}% | "
                         f"Train Loss: {running_loss / len(trainloader):.4f}")
+
+    torch.save(model.state_dict(), paths['model'])
+    with open(paths['metrics'], 'w') as fh:
+        json.dump(accuracy_history, fh, indent=4)
+    logger.info(f"Saved all artefacts to {paths['base_dir']}")
+    return accuracy_history
+
+
+def reference_step_schedule(n_pool: int, batch_size: int, num_epochs: int):
+    """(steps per full-data epoch, total steps) of the reference trainer."""
+    steps_per_epoch = math.ceil(n_pool / batch_size)
+    return steps_per_epoch, num_epochs * steps_per_epoch
+
+
+def _retrain_for_reference_steps(cfg, trainset, selected_indices, device, args, logger,
+                                 paths):
+    """
+    ``--retrain_schedule steps``: train on the subset for as many SGD steps
+    as the full-data reference took, with the reference's learning rate at
+    every step (its per-epoch cosine, indexed by full-data epoch).
+
+    The trajectory bound compares the same number of steps on the subset and
+    on the full data, and a small subset trained for the reference's epochs
+    would get a few dozen steps of fine-tuning. Batches are drawn as
+    consecutive reshuffles of the subset in one loader pass. Accuracy is
+    recorded at the full-data epochs ``retrain_on_subset`` would record.
+    """
+    num_epochs = cfg['num_epochs']
+    steps_per_epoch, total_steps = reference_step_schedule(
+        len(trainset), args.batch_size, num_epochs)
+    subset = Subset(trainset, selected_indices)
+    train_generator = torch.Generator().manual_seed(int(args.seed) + 10_000)
+    sampler = torch.utils.data.RandomSampler(
+        subset, num_samples=total_steps * args.batch_size, generator=train_generator)
+    trainloader = DataLoader(subset, batch_size=args.batch_size, sampler=sampler,
+                             pin_memory=True, num_workers=args.num_workers)
+    testloader = DataLoader(cfg['testset'], batch_size=args.batch_size, shuffle=False,
+                            pin_memory=True, num_workers=args.num_workers)
+
+    set_seed(args.seed)
+    model = build_model(cfg, cfg['num_classes'], device)
+    init_note = load_or_create_init(model, getattr(args, 'init_ckpt', None), logger)
+    criterion = nn.CrossEntropyLoss()
+    kind = getattr(args, 'retrain_optimizer', 'sgd')
+    optimizer = build_optimizer(model.parameters(), kind, args.lr,
+                                weight_decay=getattr(args, 'weight_decay', 5e-4),
+                                betas=(getattr(args, 'beta1', 0.9),
+                                       getattr(args, 'beta2', 0.999)),
+                                eps=getattr(args, 'adam_eps', 1e-8))
+
+    logger.info(f"Retraining on subset of size {len(selected_indices)} with {kind} "
+                f"(lr={args.lr}) for {total_steps} steps, the full-data reference's "
+                f"{num_epochs} epochs x {steps_per_epoch} steps, {init_note} ...")
+    accuracy_history = {}
+    running_loss = 0.0
+    model.train()
+    for step, (inputs, targets) in enumerate(trainloader):
+        epoch = step // steps_per_epoch + 1
+        for group in optimizer.param_groups:
+            group['lr'] = cosine_lr(args.lr, epoch, num_epochs)
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(inputs), targets)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+
+        if (step + 1) % steps_per_epoch == 0 and (epoch % 50 == 0 or epoch == num_epochs):
+            model.eval()
+            correct = total = 0
+            with torch.no_grad():
+                for x, y in testloader:
+                    x, y = x.to(device), y.to(device)
+                    correct += model(x).argmax(1).eq(y).sum().item()
+                    total   += y.size(0)
+            acc = 100.0 * correct / total
+            accuracy_history[epoch] = acc
+            logger.info(f"Reference epoch {epoch:03d}/{num_epochs} (step {step + 1}) | "
+                        f"Test Acc: {acc:.2f}% | "
+                        f"Train Loss: {running_loss / steps_per_epoch:.4f}")
+            model.train()
+        if (step + 1) % steps_per_epoch == 0:
+            running_loss = 0.0
 
     torch.save(model.state_dict(), paths['model'])
     with open(paths['metrics'], 'w') as fh:

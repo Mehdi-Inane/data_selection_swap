@@ -36,6 +36,9 @@ def main():
     p.add_argument('--num_workers', default=4, type=int)
     p.add_argument('--lr', default=0.01, type=float)
     p.add_argument('--num_epochs', default=None, type=int)
+    p.add_argument('--save_initial_checkpoint', action='store_true', default=False,
+                   help='Also save the starting weights as checkpoint_000.pth (epoch 0), '
+                        'e.g. the pretrained network a fine-tuning run starts from.')
     p.add_argument('--resume', action='store_true',
                    help='Resume from training_state.pth after validating the run config.')
     args = p.parse_args()
@@ -97,6 +100,9 @@ def main():
         'pool_indices_sha256': pool_indices_sha256,
         'initial_state_sha256': initial_state_sha256,
     }
+    if args.save_initial_checkpoint:
+        # Only recorded when set, so existing references keep their run id.
+        immutable_config['save_initial_checkpoint'] = True
     run_id = common.config_fingerprint(immutable_config)
     state_path = os.path.join(args.save_dir, 'training_state.pth')
     manifest_path = os.path.join(args.save_dir, trajectory.MANIFEST_NAME)
@@ -143,6 +149,20 @@ def main():
                 f"{args.save_dir} already contains trajectory artifacts. Refusing to "
                 "mix runs; pass --resume with the identical config or use a new directory."
             )
+
+    if args.save_initial_checkpoint and start_epoch == 1:
+        # theta_0, paired like every checkpoint with the LR and gradient of
+        # its outgoing update: step 1 at the first epoch's learning rate.
+        save_path = os.path.join(args.save_dir, "checkpoint_000.pth")
+        common.atomic_torch_save(copy.deepcopy(model.state_dict()), save_path)
+        checkpoint_records.append({
+            "file": os.path.basename(save_path),
+            "step": 1,
+            "epoch": 0,
+            "lr": float(optimizer.param_groups[0]['lr']),
+            "state_convention": "pre_outgoing_update",
+        })
+        logger.info(f"--> Saved initial checkpoint: {save_path}")
 
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         epoch_lr = float(optimizer.param_groups[0]['lr'])
