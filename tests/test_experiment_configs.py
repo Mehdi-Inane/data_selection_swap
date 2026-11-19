@@ -70,9 +70,10 @@ class ConfigSchemaTest(unittest.TestCase):
             "paper/faithfulness_correlation": {"score": 6},
             "revision/exp_a_low_budget": {"cached_sketch": 360, "exact_algorithm1": 20,
                                           "exact_second_order": 80, "baselines": 420},
-            "revision/cifar100_second_order": {"reference": 2, "second_order": 16, "baselines": 16},
+            "revision/cifar100_second_order": {"reference": 2, "single_swap": 8,
+                                               "second_order": 16, "baselines": 16},
             "revision/cifar10_lt_second_order": {"reference": 2, "single_swap": 8,
-                                                 "second_order": 16, "random": 8},
+                                                 "second_order": 16, "baselines": 16},
         }
         for name, stages in expected.items():
             loaded = config(name)

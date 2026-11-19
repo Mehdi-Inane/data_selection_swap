@@ -1,16 +1,18 @@
-# CIFAR-10-LT: Random and the single-swap Algorithm 1 against the second-order
-# swap. Trains its own seed-42 reference models: run the reference stage first.
+# CIFAR-10-LT: Random, GraphCut and the single-swap Algorithm 1 against the
+# second-order swap; the same methods as cifar100_second_order.yaml.
+# Trains its own seed-42 reference models: run the reference stage first.
 schema_version: 1
 name: cifar10_lt_second_order
 description: >
   CIFAR-10-LT (imbalance ratio 50, common.LONG_TAIL_RATIO: class c keeps
   5000 * 50^(-c/9) images, 13,996 in all, one fixed draw; balanced test set)
   with ResNet-18 and VGG-16 at 5%, 10%, 25% and 50% of the pool, seed 42.
-  Random and Algorithm 1 (single swap, exact gradients, the paper's 200
-  sweeps) against the second-order k x k swap with shortlist k = 8 and
-  k = 16 on the epoch-1 checkpoint, cached count sketch (p = 1024). Every
-  subset is retrained for 300 epochs (SGD, lr 0.01, batch 128) from the
-  initialisation shared by all methods.
+  Random, GraphCut and Algorithm 1 (single swap, exact gradients, the
+  paper's 200 sweeps) against the second-order k x k swap with shortlist
+  k = 8 and k = 16 (cached count sketch, p = 1024). GraphCut and both swap
+  methods read only the epoch-1 checkpoint of the seed-42 reference model.
+  Every subset is retrained for 300 epochs (SGD, lr 0.01, batch 128) from
+  the initialisation shared by all methods.
 status: ready
 
 constants:
@@ -94,13 +96,21 @@ stages:
       num_workers: 4
       download: true
 
-  random:
-    script: scripts/select/random_selection.py
+  baselines:
     grid:
       dataset: [cifar10_lt]
       architecture: [resnet18, vgg16]
+      method: [random, graphcut]
       fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        graphcut:
+          script: scripts/select/submodular.py
+          # Embed with the epoch-1 checkpoint, the one the swap selectors use.
+          args: {function: graphcut, kernel: features,
+                 embedding_checkpoint: "{reference_dir}/checkpoint_001.pth"}
     args:
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_root}/{dataset}_data"
