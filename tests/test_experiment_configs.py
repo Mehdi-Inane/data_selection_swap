@@ -72,9 +72,9 @@ class ConfigSchemaTest(unittest.TestCase):
                                           "exact_second_order": 80, "baselines": 420},
             "revision/cifar100_second_order": {"second_order": 96, "second_order_exact": 24,
                                                "baselines": 48},
-            "revision/cifar10_lt_second_order": {"reference": 2, "single_swap": 12,
-                                                 "second_order": 48, "second_order_exact": 12,
-                                                 "random": 12},
+            "revision/cifar10_lt_second_order": {"reference": 2, "single_swap": 24,
+                                                 "second_order": 96, "second_order_exact": 24,
+                                                 "random": 24},
         }
         for name, stages in expected.items():
             loaded = config(name)

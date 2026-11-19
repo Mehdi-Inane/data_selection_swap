@@ -3,7 +3,7 @@
 schema_version: 1
 name: cifar100_second_order
 description: >
-  CIFAR-100 with ResNet-18 and VGG-16 at 2%, 5%, 10% and 20% of the pool,
+  CIFAR-100 with ResNet-18 and VGG-16 at 5%, 10%, 25% and 50% of the pool,
   seeds 42, 562 and 777, all reading the seed-42 reference trajectory.
   Random and GraphCut (paper protocol: GraphCut embeds the pool with the
   last checkpoint) against the second-order k x k swap on the epoch-1
@@ -25,7 +25,7 @@ stages:
       variant: [k8, k16, k32, k32_class_balanced]
       dataset: [cifar100]
       architecture: [resnet18, vgg16]
-      fraction: [0.02, 0.05, 0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     choices:
       variant:
@@ -64,7 +64,7 @@ stages:
     grid:
       dataset: [cifar100]
       architecture: [resnet18, vgg16]
-      fraction: [0.02, 0.05, 0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     args:
       <<: *second_order
@@ -76,7 +76,7 @@ stages:
       dataset: [cifar100]
       architecture: [resnet18, vgg16]
       method: [random, graphcut]
-      fraction: [0.02, 0.05, 0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     choices:
       method:

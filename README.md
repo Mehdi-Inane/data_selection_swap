@@ -80,7 +80,7 @@ cannot set is fixed in code: SGD with Nesterov momentum 0.9, weight decay
 | `paper/jl_ablation.yaml` | Appendix K | gradient_swap (120) |
 | `revision/exp_a_low_budget.yaml` | guide Exp A | cached_sketch (360), exact_algorithm1 (20), exact_second_order (80), baselines (420) |
 | `revision/cifar100_second_order.yaml` | CIFAR-100: Random, GraphCut, second-order versions | second_order (96), second_order_exact (24), baselines (48) |
-| `revision/cifar10_lt_second_order.yaml` | CIFAR-10-LT: Random, Algorithm 1, second-order versions | reference (2), single_swap (12), second_order (48), second_order_exact (12), random (12) |
+| `revision/cifar10_lt_second_order.yaml` | CIFAR-10-LT: Random, Algorithm 1, second-order versions | reference (2), single_swap (24), second_order (96), second_order_exact (24), random (24) |
 | `revision/exp_b_contamination.yaml` | guide Exp B (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c1_coarse_cifar100.yaml` | guide Exp C.1 (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c2_long_tail.yaml` | guide Exp C.2 (planned) | reference, gradient_swap, baselines, small_validation |

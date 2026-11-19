@@ -7,13 +7,14 @@ description: >
   CIFAR-10-LT (imbalance ratio 50, common.LONG_TAIL_RATIO: class c keeps
   5000 * 50^(-c/9) images, 13,996 in all, one fixed draw for every run;
   balanced test set; one seed-42 reference trajectory) with ResNet-18 and
-  VGG-16 at 10% and 20% of the pool, seeds 42, 562 and 777. Random and
-  Algorithm 1 (single swap, exact gradients, the paper's 200 sweeps) against
-  the second-order k x k swap on the epoch-1 checkpoint: shortlist k = 8, 16
-  and 32 and the class-balanced version (k = 32, k_c = 16; its quotas follow
-  the long-tailed class counts) on the cached count sketch (p = 1024), and
-  the exact R^d version (k = 32). Every subset is retrained for 300 epochs
-  (SGD, lr 0.01, batch 128) from the initialisation shared by all methods.
+  VGG-16 at 5%, 10%, 25% and 50% of the pool, seeds 42, 562 and 777. Random
+  and Algorithm 1 (single swap, exact gradients, the paper's 200 sweeps)
+  against the second-order k x k swap on the epoch-1 checkpoint: shortlist k
+  = 8, 16 and 32 and the class-balanced version (k = 32, k_c = 16; its
+  quotas follow the long-tailed class counts) on the cached count sketch (p
+  = 1024), and the exact R^d version (k = 32). Every subset is retrained for
+  300 epochs (SGD, lr 0.01, batch 128) from the initialisation shared by all
+  methods.
 status: ready
 
 constants:
@@ -42,7 +43,7 @@ stages:
     grid:
       dataset: [cifar10_lt]
       architecture: [resnet18, vgg16]
-      fraction: [0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     args:
       swaps_per_sweep: 1
@@ -74,7 +75,7 @@ stages:
       variant: [k8, k16, k32, k32_class_balanced]
       dataset: [cifar10_lt]
       architecture: [resnet18, vgg16]
-      fraction: [0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     choices:
       variant:
@@ -113,7 +114,7 @@ stages:
     grid:
       dataset: [cifar10_lt]
       architecture: [resnet18, vgg16]
-      fraction: [0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     args:
       <<: *second_order
@@ -125,7 +126,7 @@ stages:
     grid:
       dataset: [cifar10_lt]
       architecture: [resnet18, vgg16]
-      fraction: [0.1, 0.2]
+      fraction: [0.05, 0.1, 0.25, 0.5]
       seed: [42, 562, 777]
     args:
       checkpoint_dir: "{reference_dir}"
