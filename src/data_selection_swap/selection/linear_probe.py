@@ -36,7 +36,8 @@ from .second_order import second_order_swap
 
 DATASET, ARCHITECTURE = 'cifar100_in1k', 'resnet18_in1k'
 METHODS = ('random', 'random_stratified', 'herding', 'graphcut',
-           'second_order', 'second_order_class_balanced')
+           'second_order', 'second_order_class_balanced',
+           'herding_then_swap', 'swap_two_point')
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,20 @@ def residuals(Phi, Y, W):
     R = torch.softmax(Phi @ W.T, dim=1)
     R[torch.arange(len(Y)), Y] -= 1.0
     return R
+
+
+def two_point_residuals(Phi, Y, W_star):
+    """
+    Residuals whose gradients r_i phi_i^T stack the gradients at W = 0 and at
+    W*, so ProbeGradients on them gives G(W=0) + G(W*): the two points share
+    phi, so stacking residuals stacks gradients. Each point is scaled to the
+    same mean squared centred gradient, so neither dominates.
+    """
+    blocks = []
+    for W in (torch.zeros_like(W_star), W_star):
+        R = residuals(Phi, Y, W)
+        blocks.append(R / ProbeGradients(R, Phi).q.mean().sqrt())
+    return torch.cat(blocks, dim=1)
 
 
 def herding(features, Y, quota):
@@ -216,9 +231,13 @@ def main():
                 f"gradient norm {full['grad_norm']:.2e}; budget m={m} of n={n}")
 
     grads = ProbeGradients(residuals(Phi, Y, W_star), Phi)
+    at_zero = ProbeGradients(residuals(Phi, Y, torch.zeros_like(W_star)), Phi)
+    two_point = None                                # built if swap_two_point runs
     quota = common.per_class_budget(Y.cpu(), C, m)
     features = data['train_phi'].to(device)
-    deterministic = {'herding', 'graphcut'}         # the same subset for every seed
+    herded = None
+    # The same subset for every seed.
+    deterministic = {'herding', 'graphcut', 'herding_then_swap'}
     index_dir = os.path.join(args.out_dir, 'indices')
     os.makedirs(index_dir, exist_ok=True)
 
@@ -236,11 +255,19 @@ def main():
             elif method == 'graphcut':
                 index = graphcut(features, Y, quota, C)
             else:
-                balanced = method == 'second_order_class_balanced'
+                # Class-balanced except plain second_order. herding_then_swap
+                # starts from Herding's subset (it meets the quotas);
+                # swap_two_point minimises G(W=0) + G(W*).
+                if method == 'herding_then_swap' and herded is None:
+                    herded = herding(features, Y, quota)
+                if method == 'swap_two_point' and two_point is None:
+                    two_point = ProbeGradients(two_point_residuals(Phi, Y, W_star), Phi)
                 index, _, diag = second_order_swap(
-                    grads, m, k=args.shortlist_k, max_iters=args.max_iters,
-                    labels=Y if balanced else None, num_classes=C,
-                    class_k=args.class_shortlist_k, seed=seed)
+                    two_point if method == 'swap_two_point' else grads, m,
+                    k=args.shortlist_k, max_iters=args.max_iters,
+                    labels=None if method == 'second_order' else Y, num_classes=C,
+                    class_k=args.class_shortlist_k, seed=seed,
+                    init_index=herded if method == 'herding_then_swap' else None)
                 extra = {key: diag[key] for key in ('swaps', 'reason', 'one_swap_local_optimum')}
             selection_sec = time.perf_counter() - t0
 
@@ -248,12 +275,13 @@ def main():
             W, grad_norm = fit_probe(Phi[index], Y[index], C, lam)
             pred = (Phi_test @ W.T).argmax(1)
             grads.set_subset(index)
+            at_zero.set_subset(index)
             G = grads.D(m)
             row = dict(method=method, seed=seed, fraction=args.fraction, budget=m,
                        test_acc=100.0 * float((pred == Y_test).float().mean()),
                        agreement=100.0 * float((pred == full_pred).float().mean()),
                        dist_to_full=float((W - W_star).norm()),
-                       G=G, bound=G ** 0.5 / lam,
+                       G=G, bound=G ** 0.5 / lam, G_at_zero=at_zero.D(m),
                        classes_covered=int(Y[index].unique().numel()),
                        selection_sec=selection_sec, fit_grad_norm=grad_norm, **extra)
             rows.append(row)
@@ -264,6 +292,9 @@ def main():
                         f"G={G:.3e}  ({selection_sec:.1f}s)")
 
     out = os.path.join(args.out_dir, f"results_f{args.fraction:g}_wd{lam:g}.json")
+    if os.path.exists(out):     # keep the rows of methods this run did not redo
+        with open(out) as fh:
+            rows = [r for r in json.load(fh)['rows'] if r['method'] not in args.methods] + rows
     common.atomic_json_dump(dict(dataset=DATASET, architecture=ARCHITECTURE,
                                  weight_decay=lam, full_test_acc=full_acc,
                                  full_grad_norm=full['grad_norm'], n=n, rows=rows), out)

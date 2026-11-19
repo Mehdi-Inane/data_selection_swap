@@ -7,7 +7,7 @@ import torch
 from data_selection_swap import subsets
 from data_selection_swap.selection.kl_full import CachedTrajectory
 from data_selection_swap.selection.linear_probe import (
-    ProbeGradients, fit_probe, residuals)
+    ProbeGradients, fit_probe, residuals, two_point_residuals)
 from data_selection_swap.selection.second_order import second_order_swap
 
 
@@ -50,6 +50,23 @@ class ProbeGradientsTest(unittest.TestCase):
         self.assertEqual([h.get('added') for h in runs[0][1]],
                          [h.get('added') for h in runs[1][1]])
         self.assertLess(runs[0][2]['D'], runs[0][1][0]['D'])
+
+
+class TwoPointTest(unittest.TestCase):
+    def test_stacked_residuals_give_the_sum_of_both_points(self):
+        Phi, Y = problem()
+        W_star, _ = fit_probe(Phi, Y, 4, 0.05)
+        index = torch.arange(0, 40, 4)
+        parts = []
+        for W in (torch.zeros_like(W_star), W_star):
+            R = residuals(Phi, Y, W)
+            traj = ProbeGradients(R, Phi)
+            scale = float(traj.q.mean())
+            traj.set_subset(index)
+            parts.append(traj.D(10) / scale)
+        both = ProbeGradients(two_point_residuals(Phi, Y, W_star), Phi)
+        both.set_subset(index)
+        self.assertAlmostEqual(both.D(10), sum(parts), places=12)
 
 
 class ConvexBoundTest(unittest.TestCase):

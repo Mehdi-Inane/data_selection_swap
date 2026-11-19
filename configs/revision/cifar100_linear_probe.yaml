@@ -13,7 +13,9 @@ description: >
   1e-4, 1e-3 and 1e-2. Random, stratified random, herding and GraphCut
   against the second-order swap (k = 16) and its class-balanced version
   (k_c = 16), both on the exact last-layer gradients at the full-data
-  solution. 10 selection seeds; probe fitting is deterministic.
+  solution W*, and two class-balanced variants: starting from Herding's
+  subset, and matching at W = 0 and W* together. 10 selection seeds; probe
+  fitting is deterministic.
 status: ready
 
 stages:

@@ -85,7 +85,7 @@ cannot set is fixed in code: SGD with Nesterov momentum 0.9, weight decay
 | `revision/cifar100_lt_pilot.yaml` | CIFAR-100-LT at 5% and 10%, 3 seeds: the same methods | reference (1), second_order (6), second_order_class_balanced (6), baselines (12) |
 | `revision/cifar10_noisy_pilot.yaml` | CIFAR-10 with 20% label noise (`cifar10_noisy20`) at 10%, 1 seed: Random, GraphCut, Algorithm 1, second-order k = 8, 16, class-balanced | reference (1), single_swap (1), second_order (2), second_order_class_balanced (1), baselines (2) |
 | `revision/cifar100_finetune.yaml` | Fine-tuning ImageNet ResNet-18 on CIFAR-100 at 1–10%, 1 seed, selection at fine-tune epoch 1, 10-epoch subset fine-tunes: Random, stratified random, GraphCut, Algorithm 1, second-order k = 16, class-balanced | reference (1), single_swap (4), second_order (4), second_order_class_balanced (4), baselines (12) |
-| `revision/cifar100_linear_probe.yaml` | Linear probe on frozen ImageNet ResNet-18 features of CIFAR-100 at 0.5–10%, 3 weight decays, 10 seeds: Random, stratified random, herding, GraphCut, second-order k = 16, class-balanced | probe (15) |
+| `revision/cifar100_linear_probe.yaml` | Linear probe on frozen ImageNet ResNet-18 features of CIFAR-100 at 0.5–10%, 3 weight decays, 10 seeds: Random, stratified random, herding, GraphCut, second-order k = 16, class-balanced, class-balanced from Herding, class-balanced at W = 0 and W* | probe (15) |
 | `revision/exp_b_contamination.yaml` | guide Exp B (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c1_coarse_cifar100.yaml` | guide Exp C.1 (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c2_long_tail.yaml` | guide Exp C.2 (planned) | reference, gradient_swap, baselines, small_validation |

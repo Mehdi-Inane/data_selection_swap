@@ -1,12 +1,11 @@
 # Fine-tuning an ImageNet-pretrained ResNet-18 on small subsets of CIFAR-100:
-# fine-tune the pretrained model on the full pool, select with its epoch-1
-# checkpoint, then fine-tune the pretrained model on each subset for a few
-# epochs. A short fine-tune stays close to where the gradients were matched,
-# so the match should hold over the whole run (from scratch it was gone by
-# epoch 150).
+# fine-tune the pretrained model on the full pool for 10 epochs, select with
+# its epoch-1 checkpoint, then fine-tune that same epoch-1 checkpoint on each
+# subset for 10 epochs, so training starts where the gradients were matched.
 # Trains its own seed-42 reference: run the reference stage first. Every
-# subset fine-tune starts from the pretrained model as the reference saved it
-# (checkpoint_000.pth), which only exists once the reference stage has begun.
+# subset fine-tune starts from its checkpoint_001.pth, which only exists once
+# the reference's first epoch has finished. (--save_initial_checkpoint is
+# kept so the configuration matches the reference already trained with it.)
 schema_version: 1
 name: cifar100_finetune
 description: >
@@ -18,8 +17,8 @@ description: >
   reference's epoch-1 checkpoint: Random, stratified random and GraphCut
   against Algorithm 1 and the second-order swap (k = 16, cached count sketch
   p = 1024), plain and class-balanced. Each subset is fine-tuned from the
-  pretrained model for 10 epochs over the subset (SGD, lr 0.01 cosine,
-  batch 128).
+  reference's epoch-1 checkpoint for 10 epochs over the subset (SGD, lr
+  0.01 cosine, batch 128).
 status: ready
 
 constants:
@@ -60,7 +59,7 @@ stages:
       checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
-      init_ckpt: "{reference_dir}/checkpoint_000.pth"
+      init_ckpt: "{reference_dir}/checkpoint_001.pth"
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -90,7 +89,7 @@ stages:
       checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
-      init_ckpt: "{reference_dir}/checkpoint_000.pth"
+      init_ckpt: "{reference_dir}/checkpoint_001.pth"
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -125,7 +124,7 @@ stages:
       checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
-      init_ckpt: "{reference_dir}/checkpoint_000.pth"
+      init_ckpt: "{reference_dir}/checkpoint_001.pth"
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -159,7 +158,7 @@ stages:
     args:
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
-      init_ckpt: "{reference_dir}/checkpoint_000.pth"
+      init_ckpt: "{reference_dir}/checkpoint_001.pth"
       scoring_transform: test
       retrain_optimizer: sgd
       lr: 0.01
