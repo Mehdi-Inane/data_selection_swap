@@ -1,0 +1,92 @@
+# Implementation guide, Exp C.3 (larger pool; reviewer EVFE, W3).
+schema_version: 1
+name: exp_c3_scalability
+description: >
+  Scalability of the cached count sketch on a larger pool: the second-order
+  swap (p = 1024, k = 32, epoch-1 checkpoint) against Random, Herding and
+  GraphCut, five seeds, all three architectures, recording selection time
+  and peak GPU memory per phase.
+status: planned
+requires: >
+  The dataset decision and its code: a tiny_imagenet entry (100,000 images,
+  200 classes) or an ImageNet-100 class subset, staged on the cluster.
+open_questions:
+  - "Dataset: Tiny-ImageNet or ImageNet-100 (decided later); tiny_imagenet below is a placeholder."
+  - "Budgets: the guide does not fix them; 10% below is a placeholder."
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  reference:
+    script: scripts/train/full_data.py
+    grid:
+      dataset: [tiny_imagenet]
+      architecture: [resnet18, vgg16, inception]
+      seed: [42]
+    args:
+      data_dir: "{data_root}/{dataset}_data"
+      save_dir: "{reference_dir}"
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [tiny_imagenet]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.1]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      swap_rule: second_order
+      shortlist_k: 32
+      accept_tol: 1.0e-12
+      max_iters: 1500
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 1024
+      proj_seed: 0
+      score_batch_size: 128
+      per_sample_batch_size: 64
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  baselines:
+    grid:
+      dataset: [tiny_imagenet]
+      architecture: [resnet18, vgg16, inception]
+      method: [random, herding, graphcut]
+      fraction: [0.1]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        herding: {script: scripts/select/herding.py, args: {kernel: features}}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

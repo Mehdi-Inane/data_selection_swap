@@ -88,7 +88,7 @@ srun python "${PROJECT_ROOT}/scripts/select/kl_full.py" \
     --seed "$SEED" \
     --checkpoint_dir "$CHECKPOINT_DIR" \
     --data_dir "$LOCAL_DATA" \
-    --num_checkpoints "${NUM_CHECKPOINTS:-4}" \
+    --num_checkpoints "${NUM_CHECKPOINTS:-1}" \
     --checkpoint_selection "${CHECKPOINT_SELECTION:-spread}" \
     --checkpoint_weighting "${CHECKPOINT_WEIGHTING:-point}" \
     --optimizer "$OPTIMIZER" \

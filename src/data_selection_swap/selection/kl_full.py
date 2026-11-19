@@ -78,6 +78,16 @@ This is Algorithm 3 over full-network gradients, not the manuscript's
 exact best-swap search. The exact search needs the per-pair curvature
 ||g_j - g_i||^2_M, which is unavailable here for the same reason P is;
 ``selection.kl --rule best`` does it on the last-layer kernel.
+
+Second-order rule (--swap_rule second_order)
+────────────────────────────────────────────
+The rule is in ``selection.second_order``; its two engines are here.
+Mode A (--proj_dim p > 0): ``build_cached_trajectory`` caches every sketched
+per-example gradient once, and a ``CachedTrajectory`` sweep is a matvec with
+no network pass. Mode B (--proj_dim 0): ``Trajectory`` keeps the JVP sweep
+above for the scores, and ``Trajectory.diagonal`` / ``Trajectory.swap_block``
+add exact per-example curvature, from one pass over the pool and from the 2k
+shortlisted images per sweep. --sketch_cache runs Algorithm 3 on Mode A.
 """
 
 import argparse
@@ -92,8 +102,10 @@ import torch.nn.functional as F
 
 from .. import common
 from .. import objective as d_alpha
+from .. import subsets
 from .. import trajectory as ref
 from ..paths import default_results_root, storage_variant, tree
+from . import second_order
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,6 +169,28 @@ class CountSketch:
                                      generator=generator, dtype=torch.int64)
         self.signs = (torch.randint(0, 2, (self.dim,), generator=generator,
                                     dtype=torch.int64) * 2 - 1).to(torch.int8)
+        self._tables = {}
+
+    def _tables_on(self, device):
+        """(buckets, signs) on ``device``, copied there once."""
+        key = str(device)
+        if key not in self._tables:
+            self._tables[key] = (self.buckets.to(device), self.signs.to(device))
+        return self._tables[key]
+
+    def accumulate_batch(self, out, flats, offset):
+        """
+        out[b] += R[:, offset:offset+c] @ flats[b] for every row of ``flats``.
+
+        ``flats`` [B, c] holds coordinates offset..offset+c-1, e.g. one
+        parameter tensor's per-example gradients, so a [B, d] matrix is never
+        formed. Accumulates in ``out``'s dtype.
+        """
+        stop = offset + flats.shape[1]
+        buckets, signs = self._tables_on(out.device)
+        signed = flats.to(out.dtype) * signs[offset:stop].to(out.dtype)
+        out.scatter_add_(1, buckets[offset:stop].expand(flats.shape[0], -1), signed)
+        return out
 
     def apply(self, flat):
         """R @ flat, for a single vector of length d."""
@@ -215,6 +249,26 @@ def directional_derivatives(model, params, buffers, tangent, X, Y, batch_size, o
     return out
 
 
+def disable_inplace_activations(model):
+    """Turn off ``inplace`` on activation modules before vmap(grad).
+
+    Numerically identical; it only stops in-place writes into activations
+    that per-example backward passes may still need.
+    """
+    for module in model.modules():
+        if isinstance(getattr(module, 'inplace', None), bool):
+            module.inplace = False
+    return model
+
+
+def per_sample_grads(model, params, buffers, X, Y):
+    """{name: [B, *shape]} gradients of each example's own cross-entropy."""
+    def loss_one(p, x, y):
+        logits = torch.func.functional_call(model, {**p, **buffers}, (x.unsqueeze(0),))
+        return F.cross_entropy(logits, y.unsqueeze(0))
+    return torch.func.vmap(torch.func.grad(loss_one), in_dims=(None, 0, 0))(params, X, Y)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Trajectory state
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,11 +290,19 @@ class Trajectory:
 
     def __init__(self, model, checkpoints, use_metric, X, Y, device,
                  batch_size, adam_eps=1e-8, logger=None, metric_scale=None,
-                 proj_dim=0, proj_seed=0):
-        self.model = model.eval()
+                 proj_dim=0, proj_seed=0, per_sample_batch_size=64):
+        self.model = disable_inplace_activations(model.eval())
         self.X, self.Y = X, Y
         self.batch_size = batch_size
+        self.per_sample_batch_size = int(per_sample_batch_size)
         self.order = [n for n, p in model.named_parameters() if p.requires_grad]
+        # Where each parameter sits in the flat gradient layout.
+        self.slices, start = {}, 0
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                self.slices[name] = slice(start, start + p.numel())
+                start += p.numel()
+        self._q = None
         self.weights = [c.weight for c in checkpoints]
         self.checkpoints = list(checkpoints)
         self.named = list(model.named_parameters())
@@ -418,38 +480,206 @@ class Trajectory:
             h += (2.0 / m) * w * norm * scratch
         return h
 
+    # ── Mode B of the second-order swap: exact in R^d, memory O(d + n) ──────
+
+    def per_sample_blocks(self, params, buffers, rows):
+        """(coordinates, per-example gradients [len(rows), numel]) per parameter.
+
+        The gradient of one example at a time is never materialised as a
+        single flat vector; callers work through the parameters in turn.
+        """
+        grads = per_sample_grads(self.model, params, buffers, self.X[rows], self.Y[rows])
+        for name in self.order:
+            yield self.slices[name], grads[name].flatten(start_dim=1)
+
+    def diagonal(self):
+        """
+        q_r = C_rr = sum_k w_k ||g_r^k - gbar_k||^2_{M_k} for every example.
+
+        One vmap(grad) pass over the pool per checkpoint, run once; only the n
+        float64 scalars are kept. gbar_k is known beforehand, so each example
+        is centred directly rather than through ||g||^2 - 2<g, gbar> + ||gbar||^2.
+        """
+        if self._q is None:
+            if self.sketch is not None:
+                raise RuntimeError("diagonal() is the exact Mode B path; with a count "
+                                   "sketch use build_cached_trajectory (Mode A).")
+            n = int(self.X.shape[0])
+            q = torch.zeros(n, dtype=torch.float64, device=self.X.device)
+            for (params, buffers), w, M, gbar in zip(
+                    self.states, self.weights, self.metrics, self.gbar):
+                params, buffers = self._stage(params, buffers)
+                for start in range(0, n, self.per_sample_batch_size):
+                    rows = slice(start, start + self.per_sample_batch_size)
+                    for cols, g in self.per_sample_blocks(params, buffers, rows):
+                        z = g.double() - gbar[cols]
+                        sq = z * z if M is None else z * z * M[cols]
+                        q[rows] += w * sq.sum(dim=1)
+            self._q = q
+        return self._q
+
+    def swap_block(self, drop, add, m):
+        """
+        Delta[a, b] = D(I - drop[a] + add[b]) - D(I), from per-example
+        gradients of these |drop| + |add| examples only, in float64.
+
+        Their linear scores s_r = (2/m) sum_k w_k <zeta_r, M_k v_k>
+        (v_k = u_I^k/m - gbar_k) and their centred Gram matrix give every
+        term of Delta = d_i + a_j - 2 C_ij / m^2, recomputed here rather than
+        taken from the float32 JVP scores that chose the shortlist.
+        """
+        if self.sketch is not None:
+            raise RuntimeError("swap_block() is the exact Mode B path; with a count "
+                               "sketch use build_cached_trajectory (Mode A).")
+        index = torch.cat([drop, add])
+        total, kd = index.numel(), drop.numel()
+        gram = torch.zeros(total, total, dtype=torch.float64, device=self.X.device)
+        s = torch.zeros(total, dtype=torch.float64, device=self.X.device)
+        for (params, buffers), w, M, gbar, v in zip(
+                self.states, self.weights, self.metrics, self.gbar, self.residuals(m)):
+            params, buffers = self._stage(params, buffers)
+            for cols, g in self.per_sample_blocks(params, buffers, index):
+                z = g.double() - gbar[cols]
+                mz = z if M is None else z * M[cols]
+                gram += w * (mz @ z.T)
+                s += (2.0 / m) * w * (mz @ v[cols])
+        q, inv = torch.diagonal(gram), 1.0 / m ** 2
+        return ((q[:kd] * inv - s[:kd])[:, None] + (q[kd:] * inv + s[kd:])[None, :]
+                - 2.0 * inv * gram[:kd, kd:])
+
+
+class CachedTrajectory:
+    """
+    Mode A of the second-order swap: every z_r = (sqrt(w_k) R P (g_r^k -
+    gbar_k))_k cached once as a row of Z [n, K p], so that
+
+        D(I) = || sum_{i in I} z_i ||^2 / m^2
+
+    and every swap quantity is a product with Z. No sweep makes a network
+    pass. Z is stored in float32 (205 MB at n = 50000, p = 1024, K = 1) after
+    centring in float64; every decision is computed in float64 from the
+    stored rows, so it is exact for the objective those rows define.
+
+    Implements the trajectory protocol of ``gradient_ranked_single_swap``
+    and ``second_order.second_order_swap``.
+    """
+
+    def __init__(self, Z, proj_dim=0, proj_seed=None, chunk_rows=8192):
+        self.Z = Z
+        self.X = Z.new_empty((Z.shape[0], 0))  # the protocol reads n and the device
+        self.u = None
+        self.proj_dim, self.proj_seed = int(proj_dim), proj_seed
+        self.chunk_rows = int(chunk_rows)
+        self.q = torch.cat([(rows * rows).sum(dim=1) for rows in self._rows()])
+
+    @classmethod
+    def from_gradients(cls, gradients, weights, sketch=None, dtype=torch.float32):
+        """Cache from explicit per-example gradients, one [n, d] matrix per checkpoint.
+
+        Each matrix is centred over its rows in float64, sketched if given,
+        scaled by sqrt(w), and only then cast to ``dtype``.
+        """
+        if len(gradients) != len(weights):
+            raise ValueError("one weight per gradient matrix")
+        blocks = []
+        for G, w in zip(gradients, weights):
+            G = torch.as_tensor(G).double()
+            centred = G - G.mean(dim=0, keepdim=True)
+            if sketch is not None:
+                centred = sketch.apply_batch(centred)
+            blocks.append(math.sqrt(float(w)) * centred)
+        return cls(torch.cat(blocks, dim=1).to(dtype),
+                   proj_dim=0 if sketch is None else sketch.proj_dim,
+                   proj_seed=getattr(sketch, 'seed', None))
+
+    def _rows(self, index=None):
+        """Rows of Z (all, or ``index``) in float64, ``chunk_rows`` at a time."""
+        if index is not None:
+            index = torch.as_tensor(index, device=self.Z.device)
+        count = self.Z.shape[0] if index is None else index.numel()
+        for start in range(0, count, self.chunk_rows):
+            block = slice(start, start + self.chunk_rows)
+            yield (self.Z[block] if index is None else self.Z[index[block]]).double()
+
+    def _sum(self, index):
+        return sum(rows.sum(dim=0) for rows in self._rows(index))
+
+    def set_subset(self, index):
+        self.u = [self._sum(index)]
+
+    def aggregate(self, index):
+        return [self._sum(index)]
+
+    def D(self, m):
+        return float(self.u[0] @ self.u[0]) / m ** 2
+
+    def exact_change(self, deltas, m):
+        du = deltas[0]
+        return float((2.0 * self.u[0] + du) @ du) / m ** 2
+
+    def gradient(self, m):
+        """s_r = (2/m^2) <z_r, u> for every example, in float64."""
+        return torch.cat([rows @ self.u[0] for rows in self._rows()]) * (2.0 / m ** 2)
+
+    def diagonal(self):
+        return self.q
+
+    def swap_block(self, drop, add, m):
+        """Delta[a, b] = D(I - drop[a] + add[b]) - D(I), exact in float64."""
+        Zd, Za = self.Z[drop].double(), self.Z[add].double()
+        inv = 1.0 / m ** 2
+        d = self.q[drop] * inv - 2.0 * inv * (Zd @ self.u[0])
+        a = self.q[add] * inv + 2.0 * inv * (Za @ self.u[0])
+        return d[:, None] + a[None, :] - 2.0 * inv * (Zd @ Za.T)
+
+
+def build_cached_trajectory(traj, dtype=torch.float32, logger=None):
+    """
+    Mode A cache from a ``Trajectory``: one vmap(grad) pass over the pool per
+    checkpoint.
+
+    Each parameter's per-example gradients are multiplied by sqrt(M) (Adam
+    metric only) and scattered into the sketch in float64; the sketched mean
+    gradient is subtracted and the row scaled by sqrt(w_k), still in float64,
+    and only then cast to ``dtype``. Without a sketch the rows are the exact
+    gradients, which only fits small networks (the unit tests).
+    """
+    n, device = int(traj.X.shape[0]), traj.X.device
+    sketch = traj.sketch
+    width = sketch.proj_dim if sketch is not None else sum(
+        s.stop - s.start for s in traj.slices.values())
+    Z = torch.empty(n, len(traj) * width, dtype=dtype, device=device)
+    for k, (checkpoint, (params, buffers), w, M, gbar) in enumerate(zip(
+            traj.checkpoints, traj.states, traj.weights, traj.metrics, traj.gbar)):
+        params, buffers = traj._stage(params, buffers)
+        if traj.preconditioned:     # sketched Adam metric: gbar is R(sqrt(M) gbar)
+            pre, center = traj._sqrt_scaled_metric(checkpoint).to(device), gbar
+        elif M is not None:         # exact Adam metric
+            pre = M.sqrt()
+            center = pre * gbar
+        else:
+            pre, center = None, gbar
+        columns = slice(k * width, (k + 1) * width)
+        for start in range(0, n, traj.per_sample_batch_size):
+            rows = slice(start, min(start + traj.per_sample_batch_size, n))
+            acc = torch.zeros(rows.stop - rows.start, width, dtype=torch.float64,
+                              device=device)
+            for cols, g in traj.per_sample_blocks(params, buffers, rows):
+                g = g.double() if pre is None else g.double() * pre[cols]
+                if sketch is None:
+                    acc[:, cols] += g
+                else:
+                    sketch.accumulate_batch(acc, g, cols.start)
+            Z[rows, columns] = (math.sqrt(w) * (acc - center)).to(dtype)
+        if logger:
+            logger.info(f"  cached per-example gradients at epoch {checkpoint.epoch}: "
+                        f"{n} x {width} ({dtype}).")
+    return CachedTrajectory(Z, proj_dim=traj.proj_dim, proj_seed=traj.proj_seed)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Algorithm 3
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _starting_index(n, m, seed, init_index, device):
-    """Sorted pool positions of the subset Algorithm 3 starts from.
-
-    ``init_index`` is that subset. Without it the start is a seeded random
-    draw of size ``m``.
-    """
-    if init_index is None:
-        generator = torch.Generator(device='cpu')
-        if seed is not None:
-            generator.manual_seed(seed)
-        return torch.randperm(n, generator=generator)[:m].to(device).sort().values
-    index = torch.as_tensor(init_index).detach().reshape(-1).cpu()
-    if index.dtype.is_floating_point or index.dtype == torch.bool:
-        raise ValueError(
-            f"init_index must be integer pool positions, got dtype {index.dtype}")
-    index = index.to(torch.long)
-    if index.numel() != m:
-        raise ValueError(
-            f"init_index has {index.numel()} entries; the budget is {m}")
-    if int(index.unique().numel()) != m:
-        raise ValueError("init_index contains duplicate positions")
-    if m and (int(index.min()) < 0 or int(index.max()) >= n):
-        raise ValueError(
-            f"init_index positions must lie in 0..{n - 1}, "
-            f"got {int(index.min())}..{int(index.max())}")
-    return index.to(device).sort().values
-
 
 def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
                                 candidates=1, refresh_every=0, logger=None, seed=None,
@@ -490,7 +720,7 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
     if refresh_every < 0:
         raise ValueError("refresh_every must be non-negative")
 
-    index = _starting_index(n, m, seed, init_index, traj.X.device)
+    index = subsets.initial_subset(n, m, seed=seed, init_index=init_index).to(traj.X.device)
     selected = torch.zeros(n, dtype=torch.bool, device=traj.X.device)
     selected[index] = True
     traj.set_subset(index)
@@ -554,6 +784,7 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
                 swaps += block
                 accepted_updates += 1
                 accepted = True
+                exchanged = (drop_order[:block].tolist(), add_order[:block].tolist())
             else:
                 last_rejected = (change if last_rejected is None
                                  else min(last_rejected, change))
@@ -577,6 +808,7 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
                     swaps += 1
                     accepted_updates += 1
                     accepted = True
+                    exchanged = ([i], [j])
                     break
                 last_rejected = (change if last_rejected is None
                                  else min(last_rejected, change))
@@ -597,7 +829,8 @@ def gradient_ranked_single_swap(traj, m, max_iters=200, swaps_per_sweep=1,
         history.append({"iteration": accepted_updates, "sweep": sweep,
                         "D": D_after, "swaps": swaps, "gamma": gamma,
                         "change": change, "lower_bound": best_lower_bound,
-                        "certificate_estimate": final_certificate})
+                        "certificate_estimate": final_certificate,
+                        "dropped": exchanged[0], "added": exchanged[1]})
         if logger and (sweep % 10 == 0 or sweep == 1):
             logger.info(f"sweep {sweep}: D={D_after:.6e}  swaps={swaps}  "
                         f"gamma={gamma:.3e}  change={change:.3e}")
@@ -737,6 +970,16 @@ def _retrain_only(cfg, trainset, device, args, base_dir, method, budget, K):
          'artifacts': artifacts}, paths['run'])
 
 
+SWAP_RULE_ARGUMENTS = ('swap_rule', 'shortlist_k', 'class_balanced', 'class_shortlist_k',
+                       'accept_tol', 'sketch_cache', 'per_sample_batch_size')
+# Outcome fields one swap rule reports and the other does not; copied into
+# the timing record when present.
+RULE_OUTCOMES = ('accepted_updates', 'attempted_exchanges', 'final_gamma', 'final_change',
+                 'best_rejected_change', 'lower_bound_estimate', 'certificate_estimate',
+                 'certificate_valid', 'algorithm_3_exact', 'one_swap_local_optimum',
+                 'final_best_change', 'aggregate_drift_max_abs')
+
+
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--fraction',       default=0.3,         type=float)
@@ -835,10 +1078,56 @@ def main():
                    help='Baseline that produced --init_indices. Required with it, '
                         'and written into the filename as _from_<method> so the '
                         'warm start does not share a cold-start K cell.')
+    p.add_argument('--swap_rule',      default='ranked',    choices=['ranked', 'second_order'],
+                   help="'ranked' is Algorithm 1: the top linear-ranked pair, stop at the "
+                        "first rejection. 'second_order' shortlists the --shortlist_k "
+                        'drops and adds with the smallest exact single-point change '
+                        '(linear term plus diagonal curvature) and takes the best exact '
+                        'exchange in that k x k block. With --proj_dim > 0 it runs on a '
+                        'cached count sketch with no network pass during swaps (Mode A); '
+                        'with --proj_dim 0 it is exact in R^d (Mode B).')
+    p.add_argument('--shortlist_k',    default=32,          type=int,
+                   help='second_order: drops and adds shortlisted per sweep.')
+    p.add_argument('--class_balanced', action='store_true', default=False,
+                   help='second_order: start from a draw stratified at '
+                        'common.per_class_budget quotas and only exchange examples of '
+                        'the same class, so every class keeps its quota.')
+    p.add_argument('--class_shortlist_k', default=16,       type=int,
+                   help='--class_balanced: per-class shortlist size.')
+    p.add_argument('--accept_tol',     default=1e-12,       type=float,
+                   help='second_order: accept an exchange only if its exact float64 '
+                        'change is below -accept_tol.')
+    p.add_argument('--sketch_cache',   action='store_true', default=False,
+                   help='ranked rule with --proj_dim > 0: run Algorithm 1 on the Mode A '
+                        'cache instead of a JVP sweep per iteration. (second_order always '
+                        'uses the cache when --proj_dim > 0.)')
+    p.add_argument('--per_sample_batch_size', default=64,   type=int,
+                   help='Examples per vmap(grad) call when building the Mode A cache or '
+                        'the Mode B curvature.')
     args = p.parse_args()
     if args.retrain_only and args.selection_only:
         p.error('--retrain_only reruns the retraining stage; combining it with '
                 '--selection_only (which skips retraining) is contradictory.')
+    if args.swap_rule == 'second_order':
+        if (args.swaps_per_sweep != 1 or args.candidates != 1 or args.refresh_every
+                or args.sketch_cache):
+            p.error('--swaps_per_sweep, --candidates, --refresh_every and --sketch_cache '
+                    'are options of the ranked rule.')
+    elif args.class_balanced:
+        p.error('--class_balanced requires --swap_rule second_order.')
+    if args.sketch_cache and args.proj_dim <= 0:
+        p.error('--sketch_cache caches count-sketched gradients; it needs --proj_dim > 0.')
+    if (min(args.shortlist_k, args.class_shortlist_k, args.per_sample_batch_size) < 1
+            or not args.accept_tol >= 0):
+        p.error('--shortlist_k, --class_shortlist_k and --per_sample_batch_size must be '
+                'positive and --accept_tol non-negative.')
+    cached = args.proj_dim > 0 and (args.swap_rule == 'second_order' or args.sketch_cache)
+    if cached:
+        swap_engine = 'cached_sketch'
+    elif args.swap_rule == 'second_order':
+        swap_engine = 'exact_full_network'
+    else:
+        swap_engine = 'jvp_sketch' if args.proj_dim else 'jvp_exact'
 
     common.set_seed(args.seed)
     use_metric = ref.resolve_metric(args.optimizer, args.metric)
@@ -875,7 +1164,7 @@ def main():
         if not os.path.isfile(args.init_indices):
             raise ValueError(f"Initial indices not found: {args.init_indices}")
         loaded = common.torch_load(args.init_indices, map_location='cpu')
-        init_index = _starting_index(n_train, budget, None, loaded, 'cpu')
+        init_index = subsets.initial_subset(n_train, budget, init_index=loaded)
         init_indices_sha256 = common.ordered_indices_fingerprint(init_index.tolist())
 
     if not os.path.isdir(args.checkpoint_dir):
@@ -908,6 +1197,12 @@ def main():
         method += f'_{args.scoring_transform}view'
     if args.proj_dim:
         method += f'_jl{args.proj_dim}'
+    if args.swap_rule == 'second_order':
+        method += f'_so{args.shortlist_k}'
+        if args.class_balanced:
+            method += f'_cb{args.class_shortlist_k}'
+    elif args.sketch_cache:
+        method += '_cache'
     if args.init_method:
         method += f'_from_{args.init_method}'
     if args.retrain_only:
@@ -933,9 +1228,16 @@ def main():
         'selector': 'kl_full_network',
         # --retrain_only is a recovery-mode flag, not part of the experiment:
         # it must not shift the fingerprint, or recovered artifacts would miss
-        # the interrupted run's cfg hash.
+        # the interrupted run's cfg hash. The swap-rule options are left out
+        # of a plain Algorithm 1 run for the same reason: they postdate it, and
+        # adding them would give every existing configuration a new hash, a
+        # second cfg in its result cell, and an explicit failure in
+        # analysis.comparison.
         'arguments': {**{key: value for key, value in vars(args).items()
-                         if key != 'retrain_only'},
+                         if key != 'retrain_only'
+                         and not (key in SWAP_RULE_ARGUMENTS
+                                  and args.swap_rule == 'ranked'
+                                  and not args.sketch_cache)},
                       'checkpoint_dir': os.path.realpath(args.checkpoint_dir),
                       'data_dir': os.path.realpath(args.data_dir),
                       'init_ckpt': (os.path.realpath(args.init_ckpt)
@@ -1002,7 +1304,8 @@ def main():
                  metrics=os.path.join(base_dir, f"{file_prefix}_metrics.json"),
                  timing=os.path.join(base_dir, f"{file_prefix}_timing.json"),
                  objective=os.path.join(base_dir, f"{file_prefix}_objective.json"),
-                 run=os.path.join(base_dir, f"{file_prefix}_run.json"))
+                 run=os.path.join(base_dir, f"{file_prefix}_run.json"),
+                 init_indices=os.path.join(base_dir, f"{file_prefix}_init_indices.pt"))
     if args.selection_only:
         stale = [path for path in (paths['model'], paths['metrics'])
                  if os.path.exists(path)]
@@ -1045,40 +1348,83 @@ def main():
                     f"{n_params/1e6:.1f}M trainable parameters, "
                     f"{3 * K * n_params * 8 / 1e9:.2f} GB of float64 trajectory state.")
 
+    labels = Y if args.class_balanced else None
+    start = subsets.initial_subset(n_train, budget, seed=args.seed, init_index=init_index,
+                                   labels=labels, num_classes=NUM_CLASSES)
+    # With the dropped/added positions of each accepted update in the
+    # objective history, this rebuilds the subset after any number of swaps
+    # (subsets.replay_swaps).
+    torch.save(start, paths['init_indices'])
+
     timer = common.SelectionTimer(device)
     with timer.phase('scoring'):
         traj = Trajectory(model, checkpoints, use_metric, X, Y, device,
                           args.score_batch_size, adam_eps=args.adam_eps, logger=logger,
-                          proj_dim=args.proj_dim, proj_seed=args.proj_seed)
+                          proj_dim=args.proj_dim, proj_seed=args.proj_seed,
+                          per_sample_batch_size=args.per_sample_batch_size)
+        if cached:
+            logger.info("Caching sketched per-example gradients (Mode A) ...")
+            engine = build_cached_trajectory(traj, logger=logger)
+        else:
+            engine = traj
+            if args.swap_rule == 'second_order':
+                logger.info("Per-example curvature over the pool (Mode B) ...")
+                engine.diagonal()
 
-    logger.info(f"Running gradient-ranked single-swap descent over all parameters "
-                f"(swaps_per_sweep={args.swaps_per_sweep}, "
-                f"candidates={args.candidates}) ...")
-    with timer.phase('selection'):
-        selected_indices, history, diag = gradient_ranked_single_swap(
-            traj, budget, max_iters=args.max_iters,
-            swaps_per_sweep=args.swaps_per_sweep, candidates=args.candidates,
-            refresh_every=args.refresh_every, logger=logger, seed=args.seed,
-            init_index=init_index)
+    # Model calls made by the swap search itself; Mode A makes none.
+    forward_calls = [0]
+
+    def count_forward(*_):
+        forward_calls[0] += 1
+
+    hook = model.register_forward_hook(count_forward)
+    try:
+        with timer.phase('selection'):
+            if args.swap_rule == 'second_order':
+                logger.info(f"Second-order k x k swap on the {swap_engine} engine "
+                            f"(k={args.shortlist_k}"
+                            + (f", class-balanced k_c={args.class_shortlist_k}"
+                               if args.class_balanced else "") + ") ...")
+                selected_indices, history, diag = second_order.second_order_swap(
+                    engine, budget, k=args.shortlist_k, max_iters=args.max_iters,
+                    accept_tol=args.accept_tol, labels=labels, num_classes=NUM_CLASSES,
+                    class_k=args.class_shortlist_k, init_index=start, logger=logger)
+            else:
+                logger.info(f"Gradient-ranked single-swap descent on the {swap_engine} "
+                            f"engine (swaps_per_sweep={args.swaps_per_sweep}, "
+                            f"candidates={args.candidates}) ...")
+                selected_indices, history, diag = gradient_ranked_single_swap(
+                    engine, budget, max_iters=args.max_iters,
+                    swaps_per_sweep=args.swaps_per_sweep, candidates=args.candidates,
+                    refresh_every=args.refresh_every, logger=logger, seed=args.seed,
+                    init_index=start)
+    finally:
+        hook.remove()
+    initial_D, final_D = history[0]['D'], diag['D']
+    overlap = len(set(start.tolist()) & set(selected_indices.tolist()))
     logger.info(f"{diag['sweeps']} sweeps, {diag['swaps']} accepted swaps, "
-                f"{len(selected_indices)} samples selected. "
-                f"D: {history[0]['D']:.6e} -> {diag['D']:.6e}")
+                f"{len(selected_indices)} samples selected. D: {initial_D:.6e} -> "
+                f"{final_D:.6e} ({forward_calls[0]} model calls during the search)")
 
-    common.save_timing(paths['timing'], timer, logger, method=method,
-                       run_id=run_id,
+    common.save_timing(paths['timing'], timer, logger, checkpoint_dir=args.checkpoint_dir,
+                       method=method, run_id=run_id,
                        reference_epochs_used=max(c.epoch for c in checkpoints),
-                       swap_iterations=diag['sweeps'], accepted_swaps=diag['swaps'],
-                       accepted_updates=diag['accepted_updates'],
-                       attempted_exchanges=diag['attempted_exchanges'],
+                       swap_rule=args.swap_rule, swap_engine=swap_engine,
+                       shortlist_k=(args.shortlist_k
+                                    if args.swap_rule == 'second_order' else None),
+                       class_balanced=args.class_balanced,
+                       # Swap diagnostics under the implementation guide's names.
+                       initial_G_T=initial_D, final_G_T=final_D,
+                       relative_G_T_drop_pct=(100.0 * (initial_D - final_D) / initial_D
+                                              if initial_D > 0 else 0.0),
+                       accepted_swaps=diag['swaps'], sweeps_run=diag['sweeps'],
                        stopping_reason=diag['reason'],
-                       final_gamma=diag['final_gamma'],
-                       final_change=diag['final_change'],
-                       best_rejected_change=diag['best_rejected_change'],
-                       final_D=diag['D'], metric_scale=traj.metric_scale,
-                       lower_bound_estimate=diag['lower_bound_estimate'],
-                       certificate_estimate=diag['certificate_estimate'],
-                       certificate_valid=diag['certificate_valid'],
-                       algorithm_3_exact=diag['algorithm_3_exact'],
+                       jaccard_with_init=overlap / (2 * budget - overlap),
+                       selection_forward_calls=forward_calls[0],
+                       # Names the existing analysis reads.
+                       swap_iterations=diag['sweeps'], final_D=final_D,
+                       metric_scale=traj.metric_scale,
+                       **{key: diag[key] for key in RULE_OUTCOMES if key in diag},
                        swaps_per_sweep=args.swaps_per_sweep,
                        candidates=args.candidates,
                        objective_optimizer=args.optimizer,
@@ -1097,9 +1443,9 @@ def main():
                        projection='count_sketch' if args.proj_dim else 'none')
     common.atomic_json_dump(history, paths['objective'])
 
-    # The pool, the float64 trajectory state and K sets of weights are all
-    # still resident; retraining needs none of them.
-    del traj
+    # The pool, the float64 trajectory state, the cache and K sets of
+    # weights are all still resident; retraining needs none of them.
+    del engine, traj
     del X, Y
     if device == 'cuda':
         torch.cuda.empty_cache()
@@ -1107,7 +1453,7 @@ def main():
     common.finish(cfg, trainset, selected_indices, device, args, logger, paths)
     status = 'selection_complete' if args.selection_only else 'complete'
     artifacts = {'indices': paths['indices'], 'objective': paths['objective'],
-                 'timing': paths['timing']}
+                 'timing': paths['timing'], 'init_indices': paths['init_indices']}
     if not args.selection_only:
         artifacts.update({'model': paths['model'], 'metrics': paths['metrics']})
     common.atomic_json_dump(

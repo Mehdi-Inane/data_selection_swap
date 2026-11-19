@@ -255,7 +255,11 @@ def main():
                         'checkpoints/seed_{seed}. A seedless .../checkpoints directory is '
                         'also accepted and descends to its seed_<seed> child. Every seed '
                         'needs its own manifest-validated trajectory trained on the full '
-                        'training set.')
+                        'training set, unless --allow_manifest_mismatch is set.')
+    p.add_argument('--allow_manifest_mismatch', action='store_true',
+                   help='Score every seed against one trajectory from another seed, as the '
+                        'manuscript does with the seed-42 run (Appendix G.1). Without it the '
+                        'trajectory seed, pool, dataset and architecture must match.')
     p.add_argument('--scratch', default=os.environ.get('SCRATCH', '/home/mila/a/ahmedm/scratch'))
     p.add_argument('--variant', default='sgd', choices=['sgd', 'adam'],
                    help="Result tree. 'sgd' is the historical layout; 'adam' reads "
@@ -373,7 +377,8 @@ def main():
             checkpoint_weighting=args.checkpoint_weighting,
             expected_dataset=args.dataset, expected_seed=seed,
             expected_architecture=cfg.get('architecture'),
-            expected_pool_indices_sha256=pool_indices_sha256)
+            expected_pool_indices_sha256=pool_indices_sha256,
+            allow_manifest_mismatch=args.allow_manifest_mismatch)
         ckpt_paths = [c.path for c in checkpoints]
         weights = [c.weight for c in checkpoints]
 

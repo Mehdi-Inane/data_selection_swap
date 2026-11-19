@@ -7,3 +7,4 @@ matplotlib
 pillow>=8.4.0
 tqdm>=4.24.0
 apricot-select>=0.6.0
+pyyaml>=5.1

@@ -135,7 +135,8 @@ def main():
                                              args.gc_lambda, args.optimizer, args.seed)
     logger.info(f"Selected {len(selected_indices)} samples across {NUM_CLASSES} classes.")
 
-    common.save_timing(paths['timing'], timer, logger, method=method,
+    common.save_timing(paths['timing'], timer, logger,
+                       checkpoint_dir=args.checkpoint_dir, method=method,
                        reference_epochs_used=common.reference_epochs_used(ckpts))
     with open(paths['scores'], 'w') as fh:
         json.dump({"method": method, "function": args.function, "kernel": args.kernel,

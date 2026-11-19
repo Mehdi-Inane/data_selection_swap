@@ -1,0 +1,141 @@
+# Implementation guide, Exp A. Reads paper/reference_trajectories.yaml. The
+# exact Algorithm 1 runs and the baselines at 10% and 20% are those of
+# paper/main_comparison.yaml, so they are not repeated here.
+schema_version: 1
+name: exp_a_low_budget
+description: >
+  Algorithm 1 against the second-order k x k swap (k = 32), with and without
+  class balance, at 2%, 5%, 10% and 20% of the pool, five seeds, on the
+  epoch-1 checkpoint. Every variant runs on the cached count sketch
+  (p = 1024) for all three architectures, and exactly in R^d for ResNet-18.
+  Algorithm 1 keeps the paper's 200-sweep cap; the second-order swap gets
+  the guide's 1500. The seven baselines run at the two new budgets with the
+  paper's protocol.
+status: ready
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  cached_sketch:
+    script: scripts/select/kl_full.py
+    grid:
+      variant: [algorithm1, second_order, second_order_class_balanced]
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.02, 0.05, 0.1, 0.2]
+      seed: [42, 43, 44, 45, 46]
+    choices: &swap_variants
+      variant:
+        algorithm1:
+          args: {swap_rule: ranked, sketch_cache: true, swaps_per_sweep: 1, candidates: 1,
+                 max_iters: 200}
+        second_order:
+          args: {swap_rule: second_order, shortlist_k: 32, accept_tol: 1.0e-12,
+                 max_iters: 1500}
+        second_order_class_balanced:
+          args: {swap_rule: second_order, shortlist_k: 32, class_balanced: true,
+                 class_shortlist_k: 16, accept_tol: 1.0e-12, max_iters: 1500}
+    args: &selection
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 1024
+      proj_seed: 0
+      score_batch_size: 128
+      per_sample_batch_size: 64
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  exact_algorithm1:
+    # Identical to paper/main_comparison.yaml's gradient_swap at the new budgets.
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18]
+      fraction: [0.02, 0.05]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 0
+      proj_seed: 0
+      score_batch_size: 128
+      swaps_per_sweep: 1
+      candidates: 1
+      refresh_every: 0
+      max_iters: 200
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  exact_second_order:
+    script: scripts/select/kl_full.py
+    grid:
+      variant: [second_order, second_order_class_balanced]
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18]
+      fraction: [0.02, 0.05, 0.1, 0.2]
+      seed: [42, 43, 44, 45, 46]
+    choices: *swap_variants
+    args:
+      <<: *selection
+      proj_dim: 0
+
+  baselines:
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      method: [random, herding, moderate, el2n, moso, graphcut, facility_location]
+      fraction: [0.02, 0.05]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        herding: {script: scripts/select/herding.py, args: {kernel: features}}
+        moderate: {script: scripts/select/moderate.py}
+        el2n:
+          script: scripts/select/el2n.py
+          args: {source: probes, num_probes: 10, score_epoch: 20}
+        moso:
+          script: scripts/select/moso.py
+          args: {source: surrogates, grad_space: full, num_trials: 8, surrogate_epochs: 50,
+                 samples: 10}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+        facility_location:
+          script: scripts/select/submodular.py
+          args: {function: facility_location, kernel: features}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

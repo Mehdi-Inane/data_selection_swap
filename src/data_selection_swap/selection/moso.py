@@ -243,7 +243,8 @@ def main():
         selected_indices = common.per_class_topk(scores, targets, NUM_CLASSES, budget)
     logger.info(f"Selected {len(selected_indices)} samples across {NUM_CLASSES} classes.")
 
-    common.save_timing(paths['timing'], timer, logger, method=method,
+    common.save_timing(paths['timing'], timer, logger,
+                       checkpoint_dir=args.checkpoint_dir, method=method,
                        reference_epochs_used=reference_epochs,
                        extra_training_epochs=extra_epochs)
     with open(paths['scores'], 'w') as fh:

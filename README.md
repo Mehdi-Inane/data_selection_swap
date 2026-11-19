@@ -60,6 +60,53 @@ environment. Otherwise the job uses the Python already on `PATH`. Optional
 dataset archives are `CIFAR10_ARCHIVE`, `CIFAR100_ARCHIVE`, and
 `IMAGENET_RAW_DIR` (ImageNet is not used in the manuscript).
 
+## Experiment configs
+
+Each experiment is one YAML file: `configs/paper/` holds the manuscript's,
+`configs/revision/` the implementation guide's Exp A–C. A config lists, for
+each stage, the script, a grid, and the arguments. Task i of a stage is the
+i-th grid point (last axis fastest), and every argument becomes a flag of
+the script, so the file shows every setting the run receives. What a config
+cannot set is fixed in code: SGD with Nesterov momentum 0.9, weight decay
+5e-4, the cosine schedule, augmentation, and 300 retraining epochs.
+
+| Config | Manuscript | Stages (tasks) |
+|---|---|---|
+| `paper/reference_trajectories.yaml` | step 1, Appendix G.1 | reference (6) |
+| `paper/main_comparison.yaml` | Figure 2 | gradient_swap (120), baselines (840) |
+| `paper/checkpoint_ablation.yaml` | Table 1, Appendix J | gradient_swap (600) |
+| `paper/faithfulness_correlation.yaml` | Figure 1, Appendix H | score (6) |
+| `paper/warm_start.yaml` | Appendix I | gradient_swap (20), score (1) |
+| `paper/jl_ablation.yaml` | Appendix K | gradient_swap (120) |
+| `revision/exp_a_low_budget.yaml` | guide Exp A | cached_sketch (360), exact_algorithm1 (20), exact_second_order (80), baselines (420) |
+| `revision/cifar100_second_order.yaml` | CIFAR-100: Random, GraphCut, second-order versions | second_order (96), second_order_exact (24), baselines (48) |
+| `revision/cifar10_lt_second_order.yaml` | CIFAR-10-LT: Random, Algorithm 1, second-order versions | reference (2), single_swap (12), second_order (48), second_order_exact (12), random (12) |
+| `revision/exp_b_contamination.yaml` | guide Exp B (planned) | reference, gradient_swap, baselines |
+| `revision/exp_c1_coarse_cifar100.yaml` | guide Exp C.1 (planned) | reference, gradient_swap, baselines |
+| `revision/exp_c2_long_tail.yaml` | guide Exp C.2 (planned) | reference, gradient_swap, baselines, small_validation |
+| `revision/exp_c3_scalability.yaml` | guide Exp C.3 (planned) | reference, gradient_swap, baselines |
+
+```bash
+python scripts/experiments/run_config.py validate configs/*/*.yaml   # --check-flags: also against each script's --help
+python scripts/experiments/run_config.py list configs/paper/main_comparison.yaml gradient_swap
+python scripts/experiments/run_config.py run-task configs/paper/main_comparison.yaml gradient_swap 0
+scripts/slurm/submit_config.sh configs/paper/main_comparison.yaml gradient_swap   # one Slurm array
+scripts/slurm/submit_config.sh configs/paper/main_comparison.yaml                 # one array per stage
+```
+
+`cifar10_lt` and `cifar100_lt` are the standard long-tailed CIFAR pools:
+class c keeps n_max · 50^(−c/(C−1)) training images (13,996 and 12,608),
+one fixed draw (`common.LONG_TAIL_RATIO`, `LONG_TAIL_SEED`), with the
+balanced test set. Every script accepts them as `--dataset`; each needs its
+own reference trajectory.
+
+The paper configs run what the launchers in steps 1–6 run, flag for flag
+(`tests/test_experiment_configs.py` checks this), with one deliberate
+difference: every seed reads the seed-42 trajectory, as Appendix G.1
+describes, where the launchers default to each seed's own. A `planned`
+config describes an experiment whose code does not exist yet; it validates
+and lists, but does not run.
+
 ## Protocol used in the paper
 
 Section 5 and Appendix G of the manuscript:
@@ -317,10 +364,65 @@ python scripts/plot/selected_examples.py \
   --download
 ```
 
+## 8. Second-order k×k Gradient Swap (not in the manuscript)
+
+Algorithm 1 ranks exchanges by the linear score `s_r` alone. High-norm
+examples dominate that ranking, their own curvature `C_rr/m²` makes the
+top-ranked exchange increase `G_T`, and Algorithm 1 stops at that first
+rejection. `--swap_rule second_order` shortlists by each example's exact
+single-point change instead, `d_i = -s_i + C_ii/m²` for the `k` drops and
+`a_j = s_j + C_jj/m²` for the `k` adds, and applies the best of the
+shortlisted exchanges if its exact change `d_i + a_j - 2C_ij/m²` is below
+`-accept_tol`, so `G_T` strictly decreases. The rule is
+`selection/second_order.py`; both engines are in `selection/kl_full.py`.
+
+| | Mode A: cached sketch | Mode B: exact |
+|---|---|---|
+| Selected by | `--proj_dim p` with p > 0 | `--proj_dim 0` |
+| Built once | sketched, centred per-example gradients `[n, K·p]` in float32 (205 MB at n = 50,000, p = 1024, K = 1) | per-example curvature `C_rr`, `n` scalars |
+| Per sweep | one matvec and a `k×k` matmul, no network pass | one JVP sweep over the pool, plus per-example gradients of the `2k` shortlisted images |
+
+Options: `--shortlist_k` (default 32); `--class_balanced` with
+`--class_shortlist_k` (default 16), which starts from a draw stratified at
+`per_class_budget` quotas and only exchanges examples of the same class;
+`--sketch_cache`, which runs Algorithm 1 on the Mode A cache. The method
+name gains `_so<k>`, `_cb<k_c>` or `_cache`. An Algorithm 1 run that leaves
+these options at their defaults keeps its configuration fingerprint.
+
+`kl_full` also saves `*_init_indices.pt`, the starting subset. Every
+accepted entry of `*_objective.json` records `dropped` and `added`, so
+`subsets.replay_swaps` rebuilds the subset after any number of swaps. Its
+timing file adds `initial_G_T`, `final_G_T`, `relative_G_T_drop_pct`,
+`jaccard_with_init`, `sweeps_run` and `selection_forward_calls` (0 for
+Mode A). Every selector's timing file now carries `ref_epochs_used`,
+`ref_train_sec`, `extra_probe_epochs`, `extra_train_sec`,
+`scoring_or_sketch_sec`, `swap_selection_sec`, `total_selection_sec` and the
+peak CUDA memory of each phase (`peak_scoring_vram_mb`, ...).
+
+Exp A, the comparison at the new low budgets, is
+`configs/revision/exp_a_low_budget.yaml` (see Experiment configs):
+
+```bash
+CONFIG=configs/revision/exp_a_low_budget.yaml
+scripts/slurm/submit_config.sh $CONFIG cached_sketch        # every variant, p = 1024
+scripts/slurm/submit_config.sh $CONFIG exact_algorithm1     # ResNet-18, R^d
+scripts/slurm/submit_config.sh $CONFIG exact_second_order   # ResNet-18, R^d
+scripts/slurm/submit_config.sh $CONFIG baselines            # the 2% and 5% budgets
+```
+
+Pin one GPU type for all of them (add `--gres=gpu:<type>:1`) when the
+timings and memory are to be compared. The checks are in
+`tests/test_second_order_swap.py` and need only torch:
+
+```bash
+python -m unittest tests.test_second_order_swap tests.test_swap_algorithms
+```
+
 ## What each run writes
 
 ```text
 *_indices.pt      selected pool-relative indices
+*_init_indices.pt starting subset of a Gradient Swap run
 *_timing.json     scoring and selection time
 *_objective.json  Gradient Swap objective history
 *_metrics.json    test accuracy while retraining the subset

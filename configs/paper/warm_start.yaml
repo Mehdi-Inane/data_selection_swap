@@ -1,0 +1,62 @@
+# README step 5, Appendix I. Reads the 10% CIFAR-10 / ResNet-18 subsets of
+# GraphCut, Herding, Random and EL2N from paper/main_comparison.yaml.
+schema_version: 1
+name: warm_start
+description: >
+  Gradient Swap started from a baseline's subset instead of a random one,
+  with K = 10 checkpoints, on CIFAR-10 / ResNet-18 at 10% of the pool
+  (5,000 images), five seeds; then G_T of every subset before and after,
+  on all 300 checkpoints.
+status: ready
+
+constants:
+  reference_dir: "{results}/data_selection_swap/cifar10/resnet18/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/cifar10_resnet18_seed{seed}.pth"
+
+stages:
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      init_method: [graphcut, herding, random, el2n]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      dataset: cifar10
+      architecture: resnet18
+      fraction: 0.1
+      init_indices: "{results}/data_selection_baselines/{init_method}/cifar10/resnet18/5000/seed_{seed}/{init_method}_5000_indices.pt"
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/cifar10_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 10
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 0
+      score_batch_size: 128
+      swaps_per_sweep: 1
+      candidates: 1
+      refresh_every: 0
+      max_iters: 200
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  score:
+    # Before/after table under data_selection_baselines/baseline_warmstart/.
+    script: scripts/plot/baseline_warmstart.py
+    grid:
+      dataset: [cifar10]
+    args:
+      architecture: resnet18
+      fraction: 0.1
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/cifar10_data"
+      scratch: "{results}"
+      variant: sgd
+      download: true

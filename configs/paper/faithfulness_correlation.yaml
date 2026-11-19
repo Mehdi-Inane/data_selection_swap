@@ -1,0 +1,37 @@
+# README step 4, Figure 1 and Appendix H. Scores the 10% subsets of
+# paper/main_comparison.yaml.
+schema_version: 1
+name: faithfulness_correlation
+description: >
+  G_T of every saved 10% subset (one point per method and seed) on all 300
+  checkpoints of the seed-42 trajectory, with w_k = eta_k, for the Pearson
+  correlation with the faithfulness gap. Writes
+  data_selection_baselines/d_exact_<dataset>_<architecture>_f0.1.csv.
+status: ready
+
+stages:
+  score:
+    script: scripts/analyze/score_subsets.py
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+    args:
+      checkpoint_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      scratch: "{results}"
+      fractions: [0.1]
+      seeds: [42, 43, 44, 45, 46]
+      num_checkpoints: 0                 # every stored checkpoint
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      weighting: sgd
+      variant: sgd
+      metric: none
+      scoring_transform: test
+      n_random: 3
+      gbar_cache_dir: "{results}/data_selection_swap/gbar_cache"
+      batch_size: 256
+      reference_batch_size: 128
+      num_workers: 4
+      download: true

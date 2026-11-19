@@ -1,0 +1,90 @@
+# README step 2, Figure 2. Reads paper/reference_trajectories.yaml.
+schema_version: 1
+name: main_comparison
+description: >
+  Full-network Gradient Swap (Algorithm 1 on the epoch-1 checkpoint, K = 1)
+  against Random, Herding, Moderate, EL2N, MoSo, GraphCut and Facility
+  Location on CIFAR-10/100 with ResNet-18, VGG-16 and Inception, at 10%, 20%,
+  40% and 50% of the pool, five seeds. Every subset is retrained for 300
+  epochs (SGD, lr 0.01, batch 128) from the initialisation shared by all
+  methods for that dataset, architecture and seed.
+status: ready
+
+constants:
+  # Appendix G.1: every seed reads the seed-42 trajectory.
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.1, 0.2, 0.4, 0.5]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true      # seeds 43-46 read seed 42's trajectory
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      # Objective: G_T on the epoch-1 checkpoint, w_k = eta_k, Euclidean metric.
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto                       # sgd: no Adam preconditioner
+      scoring_transform: test
+      proj_dim: 0
+      proj_seed: 0
+      score_batch_size: 128
+      # Algorithm 1: one top-ranked exchange per sweep, stop at the first rejection.
+      swaps_per_sweep: 1
+      candidates: 1
+      refresh_every: 0
+      max_iters: 200
+      # Retraining (epochs and weight decay are fixed in code: 300, 5e-4).
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  baselines:
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      method: [random, herding, moderate, el2n, moso, graphcut, facility_location]
+      fraction: [0.1, 0.2, 0.4, 0.5]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        herding: {script: scripts/select/herding.py, args: {kernel: features}}
+        moderate: {script: scripts/select/moderate.py}
+        el2n:
+          script: scripts/select/el2n.py
+          args: {source: probes, num_probes: 10, score_epoch: 20}
+        moso:
+          script: scripts/select/moso.py
+          args: {source: surrogates, grad_space: full, num_trials: 8, surrogate_epochs: 50,
+                 samples: 10}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+        facility_location:
+          script: scripts/select/submodular.py
+          args: {function: facility_location, kernel: features}
+    args:
+      # Herding, Moderate, GraphCut and Facility Location embed the pool with
+      # the last checkpoint of this trajectory.
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

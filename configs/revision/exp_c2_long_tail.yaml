@@ -1,0 +1,139 @@
+# Implementation guide, Exp C.2 (heavy tail; reviewer Lyy9, W3).
+schema_version: 1
+name: exp_c2_long_tail
+description: >
+  CIFAR-10-LT and CIFAR-100-LT with imbalance ratio 50: class c keeps
+  n_max * 50^(-c/(C-1)) training images (13,996 and 12,608 in all), one
+  fixed draw (common.LONG_TAIL_SEED); the test set stays balanced. Gradient Swap
+  (Algorithm 1, and the second-order swap with and without class balance;
+  cached sketch p = 1024, epoch-1 checkpoint) and the seven baselines select
+  10% and 20%, five seeds, all three architectures. A small-validation
+  baseline keeps the m pool examples whose epoch-1 full-network gradient is
+  most aligned with the mean gradient of v = 100 or 500 validation images,
+  drawn class-balanced from the CIFAR training images outside the pool.
+status: planned
+requires: >
+  The small-validation selector scripts/select/validation_alignment.py
+  (--val_size, --val_source). The cifar10_lt and cifar100_lt pools exist
+  (common.LONG_TAIL_RATIO = 50).
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  reference:
+    script: scripts/train/full_data.py
+    grid:
+      dataset: [cifar10_lt, cifar100_lt]
+      architecture: [resnet18, vgg16, inception]
+      seed: [42]
+    args:
+      data_dir: "{data_root}/{dataset}_data"
+      save_dir: "{reference_dir}"
+      lr: 0.01
+      num_epochs: 300
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      variant: [algorithm1, second_order, second_order_class_balanced]
+      dataset: [cifar10_lt, cifar100_lt]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.1, 0.2]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      variant:
+        algorithm1:
+          args: {swap_rule: ranked, sketch_cache: true, swaps_per_sweep: 1, candidates: 1,
+                 max_iters: 200}
+        second_order:
+          args: {swap_rule: second_order, shortlist_k: 32, accept_tol: 1.0e-12,
+                 max_iters: 1500}
+        # Quotas follow the long-tailed class counts, so the prior is kept.
+        second_order_class_balanced:
+          args: {swap_rule: second_order, shortlist_k: 32, class_balanced: true,
+                 class_shortlist_k: 16, accept_tol: 1.0e-12, max_iters: 1500}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 1024
+      proj_seed: 0
+      score_batch_size: 128
+      per_sample_batch_size: 64
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  baselines:
+    grid:
+      dataset: [cifar10_lt, cifar100_lt]
+      architecture: [resnet18, vgg16, inception]
+      method: [random, herding, moderate, el2n, moso, graphcut, facility_location]
+      fraction: [0.1, 0.2]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        herding: {script: scripts/select/herding.py, args: {kernel: features}}
+        moderate: {script: scripts/select/moderate.py}
+        el2n:
+          script: scripts/select/el2n.py
+          args: {source: probes, num_probes: 10, score_epoch: 20}
+        moso:
+          script: scripts/select/moso.py
+          args: {source: surrogates, grad_space: full, num_trials: 8, surrogate_epochs: 50,
+                 samples: 10}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+        facility_location:
+          script: scripts/select/submodular.py
+          args: {function: facility_location, kernel: features}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  small_validation:
+    script: scripts/select/validation_alignment.py
+    grid:
+      val_size: [100, 500]
+      dataset: [cifar10_lt, cifar100_lt]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.1, 0.2]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      val_source: unused_train          # class-balanced, outside the pool, never the test set
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true

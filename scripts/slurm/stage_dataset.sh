@@ -6,7 +6,8 @@
 #
 #   stage_dataset "$DATASET" "$LOCAL_DATA"
 #
-# Supported datasets: "cifar10", "cifar100", "imagenet"
+# Supported datasets: "cifar10", "cifar100", "imagenet", and "cifar10_lt" /
+# "cifar100_lt", which use the CIFAR files
 
 # Optional shared-filesystem copies. Leave unset and the training scripts
 # download CIFAR-10, CIFAR-100, and MNIST. ImageNet has no public download
@@ -39,10 +40,11 @@ stage_dataset() {
 
     mkdir -p "$local_data"
 
-    if [ "$dataset" = "cifar10" ]; then
+    # cifar10_lt / cifar100_lt are subsamples of the CIFAR files.
+    if [ "$dataset" = "cifar10" ] || [ "$dataset" = "cifar10_lt" ]; then
         _stage_cifar "CIFAR-10" "$CIFAR10_ARCHIVE" "cifar-10-batches-py" "$local_data"
 
-    elif [ "$dataset" = "cifar100" ]; then
+    elif [ "$dataset" = "cifar100" ] || [ "$dataset" = "cifar100_lt" ]; then
         _stage_cifar "CIFAR-100" "$CIFAR100_ARCHIVE" "cifar-100-python" "$local_data"
 
     elif [ "$dataset" = "imagenet" ]; then
@@ -83,7 +85,7 @@ stage_dataset() {
         fi
 
     else
-        echo "Error: Unknown dataset '$dataset'. Choose 'cifar10', 'cifar100' or 'imagenet'." >&2
+        echo "Error: Unknown dataset '$dataset'. Choose 'cifar10', 'cifar100', 'cifar10_lt', 'cifar100_lt' or 'imagenet'." >&2
         return 1
     fi
 }

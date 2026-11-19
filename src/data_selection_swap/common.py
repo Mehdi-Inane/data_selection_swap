@@ -41,9 +41,15 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 
 from .paths import default_results_root, storage_variant, tree
+from .subsets import long_tail_indices
+from .subsets import per_class_budget  # noqa: F401  (re-exported: common.per_class_budget)
 from torchvision.models.googlenet import BasicConv2d
 
-DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet')
+DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet', 'cifar10_lt', 'cifar100_lt')
+# CIFAR-10-LT / CIFAR-100-LT: the standard exponential profile with imbalance
+# ratio 50 (13,996 / 12,608 training images), one pool for every run.
+LONG_TAIL_RATIO = 50
+LONG_TAIL_SEED = 0
 ARCHITECTURES = (
     'resnet18', 'vgg16', 'inception',
     # Retained for the existing mh-only controlled experiments.
@@ -219,6 +225,15 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
     colour datasets and uses LeNet for MNIST.
     """
     dataset = dataset.lower()
+    if dataset in ('cifar10_lt', 'cifar100_lt'):
+        # The base CIFAR data and balanced test set; the pool is a fixed
+        # long-tailed subsample that make_train_set uses.
+        cfg = get_dataset_config(dataset[:-len('_lt')], data_dir, download=download,
+                                 architecture=architecture)
+        cfg['dataset'] = dataset
+        cfg['pool_indices'] = long_tail_indices(
+            cfg['full_train'].targets, cfg['num_classes'], LONG_TAIL_RATIO, LONG_TAIL_SEED)
+        return cfg
     default_architecture = 'lenet' if dataset == 'mnist' else 'resnet18'
     architecture = architecture or default_architecture
     if architecture not in ARCHITECTURES:
@@ -425,14 +440,18 @@ def scoring_subset(cfg: dict, trainset: Subset, scoring_transform: str = 'test')
 
 def make_train_set(cfg: dict) -> Subset:
     """
-    The selection pool: the *entire* training set, no validation hold-out.
+    The selection pool: the entire training set, no validation hold-out, or
+    for a long-tailed dataset its fixed subsample (``cfg['pool_indices']``).
 
-    Returned as a ``Subset`` over ``range(len(full_train))`` so that every
-    consumer of ``.indices`` / ``.dataset`` keeps working; pool position i is
-    simply training example i. Selection and retraining never touch the test
+    Returned as a ``Subset`` of ``full_train`` so that every consumer of
+    ``.indices`` / ``.dataset`` keeps working; pool position i is training
+    example ``indices[i]``. Selection and retraining never touch the test
     set or any held-out split.
     """
-    return Subset(cfg['full_train'], list(range(len(cfg['full_train']))))
+    indices = cfg.get('pool_indices')
+    if indices is None:
+        indices = range(len(cfg['full_train']))
+    return Subset(cfg['full_train'], list(indices))
 
 
 def make_loaders(cfg: dict, seed: int, batch_size: int, num_workers: int,
@@ -693,21 +712,10 @@ def kernel_to_similarity(K: torch.Tensor) -> torch.Tensor:
 #   Used by methods that are natively defined per class (Herding,
 #   MoSo, GraphCut / Facility Location), so every class contributes
 #   budget * (class_count / n_train) samples, matching the public
-#   reference implementations linked for each method. Uses
-#   largest-remainder rounding so quotas sum exactly to `budget`.
+#   reference implementations linked for each method. The quotas come
+#   from subsets.per_class_budget (largest-remainder rounding, so they sum
+#   exactly to `budget`), which the class-balanced swap uses too.
 # ─────────────────────────────────────────────────────────────────────────────
-def per_class_budget(targets: torch.Tensor, num_classes: int, budget: int) -> torch.Tensor:
-    counts = torch.bincount(targets, minlength=num_classes).float()
-    raw    = counts * (budget / counts.sum())
-    quota  = raw.floor().long()
-    remainder = int(budget - quota.sum().item())
-    if remainder > 0:
-        frac_order = torch.argsort(raw - quota.float(), descending=True)
-        for c in frac_order[:remainder]:
-            quota[c] += 1
-    return quota  # LongTensor [num_classes]
-
-
 def per_class_topk(scores: torch.Tensor, targets: torch.Tensor, num_classes: int,
                    budget: int) -> torch.Tensor:
     quota = per_class_budget(targets, num_classes, budget)
@@ -745,35 +753,90 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 #   those epochs from the full-data trainer's timing file.
 # ─────────────────────────────────────────────────────────────────────────────
 class SelectionTimer:
+    """Wall-clock and peak CUDA memory per phase.
+
+    The peak counter is reset when a phase starts, so ``peak_vram_mb[name]``
+    is the largest allocation seen while that phase ran (including tensors
+    that were already resident when it began).
+    """
+
     def __init__(self, device: str):
         self.device = device
         self.phases = {}
+        self.peak_vram_mb = {}
+
+    def _cuda(self) -> bool:
+        return self.device == 'cuda' and torch.cuda.is_available()
 
     def _sync(self):
-        if self.device == 'cuda' and torch.cuda.is_available():
+        if self._cuda():
             torch.cuda.synchronize()
 
     @contextmanager
     def phase(self, name: str):
         self._sync()
+        if self._cuda():
+            torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         try:
             yield
         finally:
             self._sync()
             self.phases[name] = self.phases.get(name, 0.0) + time.perf_counter() - t0
+            if self._cuda():
+                peak = torch.cuda.max_memory_allocated() / 1e6
+                self.peak_vram_mb[name] = max(self.peak_vram_mb.get(name, 0.0), peak)
 
     def total(self) -> float:
         return sum(self.phases.values())
 
 
-def save_timing(path: str, timer: SelectionTimer, logger, **extra):
+def reference_train_seconds(checkpoint_dir: str, epochs: int):
+    """Seconds the full-data trainer spent on its first ``epochs`` epochs.
+
+    Read from the trainer's ``train_time.json``. None when that file is
+    missing, e.g. for a trajectory copied without its timing record.
+    """
+    path = os.path.join(checkpoint_dir, 'train_time.json')
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        seconds = json.load(fh).get('epoch_seconds') or []
+    return float(sum(seconds[:max(int(epochs), 0)]))
+
+
+def save_timing(path: str, timer: SelectionTimer, logger, checkpoint_dir: str = None,
+                **extra):
+    """Write the timing record. ``extra`` carries method-specific fields.
+
+    Besides the phase times, the record has the cost breakdown under the
+    implementation guide's names, derived here once for every selector:
+    the reference-trajectory epochs a method used and their training time
+    (``checkpoint_dir``'s train_time.json), the epochs it trained on its own
+    (``extra_training_epochs``: EL2N probes, MoSo surrogates), and the time
+    and peak CUDA memory of each phase.
+    """
+    phases = timer.phases
+    ref_epochs = extra.get('reference_epochs_used')
+    if not ref_epochs:
+        ref_train_sec = 0.0 if ref_epochs == 0 else None
+    else:
+        ref_train_sec = (reference_train_seconds(checkpoint_dir, ref_epochs)
+                         if checkpoint_dir else None)
     record = dict(
-        phases_seconds=timer.phases,
+        phases_seconds=phases,
         selection_seconds=timer.total(),
         device=torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu',
-        **extra,
+        ref_epochs_used=ref_epochs,
+        ref_train_sec=ref_train_sec,
+        extra_probe_epochs=extra.get('extra_training_epochs', 0),
+        extra_train_sec=phases.get('extra_training', 0.0),
+        scoring_or_sketch_sec=phases.get('scoring', 0.0),
+        swap_selection_sec=phases.get('selection', 0.0),
+        total_selection_sec=timer.total(),
+        **{f'peak_{name}_vram_mb': peak for name, peak in timer.peak_vram_mb.items()},
     )
+    record.update(extra)
     atomic_json_dump(record, path)
     logger.info(f"Selection time: {timer.total():.1f}s  phases="
                 + ", ".join(f"{k}={v:.1f}s" for k, v in timer.phases.items()))

@@ -1,0 +1,27 @@
+# README step 1, Appendix G.1. Every other experiment reads these runs.
+schema_version: 1
+name: reference_trajectories
+description: >
+  The full-data SGD trajectory of each dataset and architecture: seed 42,
+  300 epochs, checkpoints after epochs 1-10 and every 10 epochs after that.
+  One trajectory per dataset and architecture is shared by every selection
+  seed (Appendix G.1).
+status: ready
+
+stages:
+  reference:
+    # Fixed in code: SGD with Nesterov momentum 0.9, weight decay 5e-4, a
+    # cosine schedule, random-crop and flip augmentation (common.py).
+    script: scripts/train/full_data.py
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      seed: [42]
+    args:
+      data_dir: "{data_root}/{dataset}_data"
+      save_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_{seed}"
+      lr: 0.01
+      num_epochs: 300
+      batch_size: 128
+      num_workers: 4
+      download: true

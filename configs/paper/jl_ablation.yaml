@@ -1,0 +1,45 @@
+# README step 6, Appendix K. The exact aggregates (p = d) are the K = 1 and
+# K = 4 runs of paper/checkpoint_ablation.yaml.
+schema_version: 1
+name: jl_ablation
+description: >
+  Gradient Swap with every full-network aggregate count-sketched to width
+  p = 1024, 2048 or 4096 (swap decisions exact for the sketched objective),
+  at K = 1 and K = 4 checkpoints, on CIFAR-10 with ResNet-18.
+status: ready
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [cifar10]
+      architecture: [resnet18]
+      num_checkpoints: [1, 4]
+      proj_dim: [1024, 2048, 4096]
+      fraction: [0.1, 0.2, 0.4, 0.5]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_seed: 0
+      score_batch_size: 128
+      swaps_per_sweep: 1
+      candidates: 1
+      refresh_every: 0
+      max_iters: 200
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true

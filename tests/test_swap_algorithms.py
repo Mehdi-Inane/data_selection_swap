@@ -30,9 +30,10 @@ def _ranked_pairs(drop_idx, drop_h, add_idx, add_h):
     yield from sorted(pairs)
 
 
-def _load(name):
-    full_name = f"{PACKAGE}.selection.{name}"
-    spec = importlib.util.spec_from_file_location(full_name, SOURCE / f"{name}.py")
+def _load(name, path=None, full_name=None):
+    full_name = full_name or f"{PACKAGE}.selection.{name}"
+    spec = importlib.util.spec_from_file_location(
+        full_name, path or SOURCE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[full_name] = module
     assert spec.loader is not None
@@ -69,6 +70,8 @@ sys.modules.update({
     f"{PACKAGE}.paths": paths,
 })
 
+_load("subsets", SOURCE.parent / "subsets.py", f"{PACKAGE}.subsets")
+_load("second_order")
 kl = _load("kl")
 kl_full = _load("kl_full")
 

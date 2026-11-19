@@ -1,0 +1,45 @@
+# README step 3, Table 1 (CIFAR-10, ResNet-18 rows) and Appendix J.
+# Reads paper/reference_trajectories.yaml.
+schema_version: 1
+name: checkpoint_ablation
+description: >
+  Gradient Swap with K = 1, 4, 10, 15 and 20 checkpoints, spaced in
+  optimizer steps across the 300 epochs (K = 1 is the epoch-1 checkpoint).
+  Everything else is the main comparison's Gradient Swap.
+status: ready
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [cifar10, cifar100]
+      architecture: [resnet18, vgg16, inception]
+      num_checkpoints: [1, 4, 10, 15, 20]
+      fraction: [0.1, 0.2, 0.4, 0.5]
+      seed: [42, 43, 44, 45, 46]
+    args:
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 0
+      proj_seed: 0
+      score_batch_size: 128
+      swaps_per_sweep: 1
+      candidates: 1
+      refresh_every: 0
+      max_iters: 200
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true

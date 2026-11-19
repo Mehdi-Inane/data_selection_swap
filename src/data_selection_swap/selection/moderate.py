@@ -90,7 +90,8 @@ def main():
                 f"[{distance[selected_indices].min():.3f}, {distance[selected_indices].max():.3f}] "
                 f"(median {distance.median():.3f}).")
 
-    common.save_timing(paths['timing'], timer, logger, method='moderate',
+    common.save_timing(paths['timing'], timer, logger,
+                       checkpoint_dir=args.checkpoint_dir, method='moderate',
                        reference_epochs_used=common.reference_epochs_used([ckpt]))
     with open(paths['scores'], 'w') as fh:
         json.dump({"method": "moderate", "embedding_checkpoint": ckpt,

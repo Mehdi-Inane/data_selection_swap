@@ -1,0 +1,97 @@
+# CIFAR-100: Random and GraphCut against versions of the second-order swap.
+# Reads the seed-42 reference trajectories of paper/reference_trajectories.yaml.
+schema_version: 1
+name: cifar100_second_order
+description: >
+  CIFAR-100 with ResNet-18 and VGG-16 at 2%, 5%, 10% and 20% of the pool,
+  seeds 42, 562 and 777, all reading the seed-42 reference trajectory.
+  Random and GraphCut (paper protocol: GraphCut embeds the pool with the
+  last checkpoint) against the second-order k x k swap on the epoch-1
+  checkpoint: shortlist k = 8, 16 and 32 and the class-balanced version (k =
+  32, k_c = 16) on the cached count sketch (p = 1024), and the exact R^d
+  version (k = 32). Every subset is retrained for 300 epochs (SGD, lr 0.01,
+  batch 128) from the initialisation shared by all methods.
+status: ready
+
+constants:
+  # One reference trajectory, seed 42, shared by every run (Appendix G.1).
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  second_order:
+    script: scripts/select/kl_full.py
+    grid:
+      variant: [k8, k16, k32, k32_class_balanced]
+      dataset: [cifar100]
+      architecture: [resnet18, vgg16]
+      fraction: [0.02, 0.05, 0.1, 0.2]
+      seed: [42, 562, 777]
+    choices:
+      variant:
+        k8: {args: {shortlist_k: 8}}
+        k16: {args: {shortlist_k: 16}}
+        k32: {args: {shortlist_k: 32}}
+        k32_class_balanced: {args: {shortlist_k: 32, class_balanced: true,
+                                    class_shortlist_k: 16}}
+    args: &second_order
+      swap_rule: second_order
+      accept_tol: 1.0e-12
+      max_iters: 1500
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true      # seeds 562 and 777 read seed 42's trajectory
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 1024
+      proj_seed: 0
+      score_batch_size: 128
+      per_sample_batch_size: 64
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  second_order_exact:
+    # One JVP sweep over the pool per swap: hours per run, unlike the cache.
+    script: scripts/select/kl_full.py
+    grid:
+      dataset: [cifar100]
+      architecture: [resnet18, vgg16]
+      fraction: [0.02, 0.05, 0.1, 0.2]
+      seed: [42, 562, 777]
+    args:
+      <<: *second_order
+      shortlist_k: 32
+      proj_dim: 0
+
+  baselines:
+    grid:
+      dataset: [cifar100]
+      architecture: [resnet18, vgg16]
+      method: [random, graphcut]
+      fraction: [0.02, 0.05, 0.1, 0.2]
+      seed: [42, 562, 777]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

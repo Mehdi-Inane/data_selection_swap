@@ -1,0 +1,126 @@
+# Implementation guide, Exp C.1 (hidden subpopulations; Section 3.1 and
+# Corollary 4.2).
+schema_version: 1
+name: exp_c1_coarse_cifar100
+description: >
+  CIFAR-100 relabelled with its 20 superclasses. In each superclass one fine
+  subclass, drawn at random from a pool seed shared by every run, keeps all
+  500 training images and the other four keep 75 each (16,000 images, drawn
+  from the same seed). Selection and training see only the coarse labels.
+  Gradient Swap (Algorithm 1, and the second-order swap with and without
+  class balance; cached sketch p = 1024, epoch-1 checkpoint) and the seven
+  baselines select 5% and 10%, five seeds, all three architectures.
+  Evaluation: 20-way accuracy on the full CIFAR-100 test set, accuracy on
+  the 80 rare subclasses, worst-superclass accuracy, and per-class selected
+  counts.
+status: planned
+requires: >
+  Phase 2: the cifar100_coarse dataset (--dominant_count, --rare_count,
+  --pool_seed) whose fine labels only the evaluation can read (check 7), and
+  the subgroup metrics in the retraining record.
+
+constants:
+  reference_dir: "{results}/data_selection_swap/cifar100_coarse/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/cifar100_coarse_{architecture}_seed{seed}.pth"
+
+stages:
+  reference:
+    script: scripts/train/full_data.py
+    grid:
+      dataset: [cifar100_coarse]
+      architecture: [resnet18, vgg16, inception]
+      seed: [42]
+    args:
+      dominant_count: 500
+      rare_count: 75
+      pool_seed: 0
+      data_dir: "{data_root}/cifar100_data"
+      save_dir: "{reference_dir}"
+      lr: 0.01
+      num_epochs: 300
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  gradient_swap:
+    script: scripts/select/kl_full.py
+    grid:
+      variant: [algorithm1, second_order, second_order_class_balanced]
+      dataset: [cifar100_coarse]
+      architecture: [resnet18, vgg16, inception]
+      fraction: [0.05, 0.1]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      variant:
+        algorithm1:
+          args: {swap_rule: ranked, sketch_cache: true, swaps_per_sweep: 1, candidates: 1,
+                 max_iters: 200}
+        second_order:
+          args: {swap_rule: second_order, shortlist_k: 32, accept_tol: 1.0e-12,
+                 max_iters: 1500}
+        second_order_class_balanced:
+          args: {swap_rule: second_order, shortlist_k: 32, class_balanced: true,
+                 class_shortlist_k: 16, accept_tol: 1.0e-12, max_iters: 1500}
+    args:
+      dominant_count: 500
+      rare_count: 75
+      pool_seed: 0
+      checkpoint_dir: "{reference_dir}"
+      allow_manifest_mismatch: true
+      data_dir: "{data_root}/cifar100_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_dim: 1024
+      proj_seed: 0
+      score_batch_size: 128
+      per_sample_batch_size: 64
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  baselines:
+    grid:
+      dataset: [cifar100_coarse]
+      architecture: [resnet18, vgg16, inception]
+      method: [random, herding, moderate, el2n, moso, graphcut, facility_location]
+      fraction: [0.05, 0.1]
+      seed: [42, 43, 44, 45, 46]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        herding: {script: scripts/select/herding.py, args: {kernel: features}}
+        moderate: {script: scripts/select/moderate.py}
+        el2n:
+          script: scripts/select/el2n.py
+          args: {source: probes, num_probes: 10, score_epoch: 20}
+        moso:
+          script: scripts/select/moso.py
+          args: {source: surrogates, grad_space: full, num_trials: 8, surrogate_epochs: 50,
+                 samples: 10}
+        graphcut:
+          script: scripts/select/submodular.py
+          args: {function: graphcut, kernel: features}
+        facility_location:
+          script: scripts/select/submodular.py
+          args: {function: facility_location, kernel: features}
+    args:
+      dominant_count: 500
+      rare_count: 75
+      pool_seed: 0
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/cifar100_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

@@ -135,7 +135,8 @@ def main():
     logger.info(f"Selected {len(selected_indices)} samples; EL2N range "
                 f"[{scores[selected_indices].min():.4f}, {scores[selected_indices].max():.4f}].")
 
-    common.save_timing(paths['timing'], timer, logger, method=method,
+    common.save_timing(paths['timing'], timer, logger,
+                       checkpoint_dir=args.checkpoint_dir, method=method,
                        reference_epochs_used=reference_epochs,
                        extra_training_epochs=0 if args.source == 'trajectory'
                        else args.num_probes * args.score_epoch)

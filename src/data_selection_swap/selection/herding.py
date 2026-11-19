@@ -114,7 +114,8 @@ def main():
         selected_indices = herding_select(kernels, class_idx, quota, device)
     logger.info(f"Selected {len(selected_indices)} samples across {NUM_CLASSES} classes.")
 
-    common.save_timing(paths['timing'], timer, logger, method=method,
+    common.save_timing(paths['timing'], timer, logger,
+                       checkpoint_dir=args.checkpoint_dir, method=method,
                        reference_epochs_used=common.reference_epochs_used(ckpts))
     with open(paths['scores'], 'w') as fh:
         json.dump({"method": method, "kernel": args.kernel, "checkpoints": ckpts,
