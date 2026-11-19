@@ -46,6 +46,22 @@ def long_tail_indices(targets, num_classes, ratio, seed=0):
     return torch.cat(kept).sort().values.tolist()
 
 
+def label_noise(targets, num_classes, rate, seed=0):
+    """
+    Symmetric label noise: a seeded ``rate`` fraction of the examples gets a
+    uniformly random *wrong* label. Returns (noisy targets as a list, sorted
+    positions of the corrupted examples).
+    """
+    targets = torch.as_tensor(targets, dtype=torch.long).reshape(-1)
+    n = targets.numel()
+    generator = torch.Generator(device='cpu').manual_seed(int(seed))
+    corrupt = torch.randperm(n, generator=generator)[:int(round(rate * n))].sort().values
+    shift = torch.randint(1, num_classes, (corrupt.numel(),), generator=generator)
+    noisy = targets.clone()
+    noisy[corrupt] = (targets[corrupt] + shift) % num_classes
+    return noisy.tolist(), corrupt.tolist()
+
+
 def initial_subset(n, m, *, seed=None, init_index=None, labels=None, num_classes=None):
     """
     Sorted CPU positions of the subset a swap search starts from.

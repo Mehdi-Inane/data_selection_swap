@@ -81,6 +81,9 @@ cannot set is fixed in code: SGD with Nesterov momentum 0.9, weight decay
 | `revision/exp_a_low_budget.yaml` | guide Exp A | cached_sketch (360), exact_algorithm1 (20), exact_second_order (80), baselines (420) |
 | `revision/cifar100_second_order.yaml` | CIFAR-100: Random, GraphCut, Algorithm 1, second-order k = 8, 16, class-balanced k = 16 | reference (2), single_swap (8), second_order (16), second_order_class_balanced (8), baselines (16) |
 | `revision/cifar10_lt_second_order.yaml` | CIFAR-10-LT: the same methods | reference (2), single_swap (8), second_order (16), second_order_class_balanced (8), baselines (16) |
+| `revision/cifar100_low_budget.yaml` | CIFAR-100 at 1% and 2%, 3 seeds: Random, GraphCut, second-order k = 16, class-balanced | second_order (6), second_order_class_balanced (6), baselines (12) |
+| `revision/cifar100_lt_pilot.yaml` | CIFAR-100-LT at 5% and 10%, 3 seeds: the same methods | reference (1), second_order (6), second_order_class_balanced (6), baselines (12) |
+| `revision/cifar10_noisy_pilot.yaml` | CIFAR-10 with 20% label noise (`cifar10_noisy20`) at 10%, 1 seed: Random, GraphCut, Algorithm 1, second-order k = 8, 16, class-balanced | reference (1), single_swap (1), second_order (2), second_order_class_balanced (1), baselines (2) |
 | `revision/exp_b_contamination.yaml` | guide Exp B (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c1_coarse_cifar100.yaml` | guide Exp C.1 (planned) | reference, gradient_swap, baselines |
 | `revision/exp_c2_long_tail.yaml` | guide Exp C.2 (planned) | reference, gradient_swap, baselines, small_validation |

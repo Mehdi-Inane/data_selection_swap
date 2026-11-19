@@ -1,0 +1,125 @@
+# CIFAR-100-LT pilot: rare classes have 10 training images, so a small
+# random subset often misses them. Trains its own seed-42 reference.
+schema_version: 1
+name: cifar100_lt_pilot
+description: >
+  CIFAR-100-LT (imbalance ratio 50, 12,608 images, rarest classes 10 images;
+  balanced test set), ResNet-18, 5% and 10% of the pool, seeds 42, 562 and
+  777. Random and GraphCut (epoch-1 features) against the second-order swap
+  (k = 16) and its class-balanced version (k_c = 16), cached count sketch
+  p = 1024, epoch-1 checkpoint of the seed-42 reference. Retraining: 300
+  epochs, SGD, lr 0.01, batch 128, shared initialisation per seed.
+status: ready
+
+constants:
+  reference_dir: "{results}/data_selection_swap/{dataset}/{architecture}/checkpoints/seed_42"
+  init_ckpt: "{results}/data_selection_swap/init/{dataset}_{architecture}_seed{seed}.pth"
+
+stages:
+  reference:
+    script: scripts/train/full_data.py
+    grid:
+      dataset: [cifar100_lt]
+      architecture: [resnet18]
+      seed: [42]
+    args:
+      data_dir: "{data_root}/{dataset}_data"
+      save_dir: "{reference_dir}"
+      lr: 0.01
+      num_epochs: 300
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  second_order:
+    script: scripts/select/kl_full.py
+    grid:
+      shortlist_k: [16]
+      dataset: [cifar100_lt]
+      architecture: [resnet18]
+      fraction: [0.05, 0.1]
+      seed: [42, 562, 777]
+    args:
+      swap_rule: second_order
+      accept_tol: 1.0e-12
+      max_iters: 1500
+      proj_dim: 1024
+      per_sample_batch_size: 64
+      allow_manifest_mismatch: true      # every seed reads the seed-42 trajectory
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_seed: 0
+      score_batch_size: 128
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  second_order_class_balanced:
+    script: scripts/select/kl_full.py
+    grid:
+      shortlist_k: [16]
+      dataset: [cifar100_lt]
+      architecture: [resnet18]
+      fraction: [0.05, 0.1]
+      seed: [42, 562, 777]
+    args:
+      swap_rule: second_order
+      class_balanced: true
+      class_shortlist_k: 16
+      accept_tol: 1.0e-12
+      max_iters: 1500
+      proj_dim: 1024
+      per_sample_batch_size: 64
+      allow_manifest_mismatch: true      # every seed reads the seed-42 trajectory
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      num_checkpoints: 1
+      checkpoint_selection: spread
+      checkpoint_weighting: point
+      optimizer: sgd
+      metric: auto
+      scoring_transform: test
+      proj_seed: 0
+      score_batch_size: 128
+      retrain_optimizer: sgd
+      lr: 0.01
+      batch_size: 128
+      num_workers: 4
+      download: true
+
+  baselines:
+    grid:
+      dataset: [cifar100_lt]
+      architecture: [resnet18]
+      method: [random, graphcut]
+      fraction: [0.05, 0.1]
+      seed: [42, 562, 777]
+    choices:
+      method:
+        random: {script: scripts/select/random_selection.py}
+        graphcut:
+          script: scripts/select/submodular.py
+          # Embed with the epoch-1 checkpoint, the one the swap selectors use.
+          args: {function: graphcut, kernel: features,
+                 embedding_checkpoint: "{reference_dir}/checkpoint_001.pth"}
+    args:
+      checkpoint_dir: "{reference_dir}"
+      data_dir: "{data_root}/{dataset}_data"
+      init_ckpt: "{init_ckpt}"
+      scoring_transform: test
+      retrain_optimizer: sgd
+      lr: 0.01
+      weight_decay: 0.0005
+      batch_size: 128
+      num_workers: 4
+      download: true

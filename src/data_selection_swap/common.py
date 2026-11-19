@@ -41,15 +41,20 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
 
 from .paths import default_results_root, storage_variant, tree
-from .subsets import long_tail_indices
+from .subsets import label_noise, long_tail_indices
 from .subsets import per_class_budget  # noqa: F401  (re-exported: common.per_class_budget)
 from torchvision.models.googlenet import BasicConv2d
 
-DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet', 'cifar10_lt', 'cifar100_lt')
+DATASETS = ('cifar10', 'cifar100', 'mnist', 'imagenet', 'cifar10_lt', 'cifar100_lt',
+            'cifar10_noisy20')
 # CIFAR-10-LT / CIFAR-100-LT: the standard exponential profile with imbalance
 # ratio 50 (13,996 / 12,608 training images), one pool for every run.
 LONG_TAIL_RATIO = 50
 LONG_TAIL_SEED = 0
+# CIFAR-10 with symmetric label noise: 20% of the training images get a random
+# wrong label (one fixed draw, LABEL_NOISE_SEED); the test set stays clean.
+LABEL_NOISE = {'cifar10_noisy20': ('cifar10', 0.2)}
+LABEL_NOISE_SEED = 0
 ARCHITECTURES = (
     'resnet18', 'vgg16', 'inception',
     # Retained for the existing mh-only controlled experiments.
@@ -233,6 +238,19 @@ def get_dataset_config(dataset: str, data_dir: str, download: bool = False,
         cfg['dataset'] = dataset
         cfg['pool_indices'] = long_tail_indices(
             cfg['full_train'].targets, cfg['num_classes'], LONG_TAIL_RATIO, LONG_TAIL_SEED)
+        return cfg
+    if dataset in LABEL_NOISE:
+        # The base CIFAR data with a fixed fraction of wrong training labels.
+        # cfg['corrupt_indices'] lists the corrupted pool positions (the pool
+        # is the whole training set), so each selector's kept share can be
+        # counted afterwards. The test set is untouched.
+        base, rate = LABEL_NOISE[dataset]
+        cfg = get_dataset_config(base, data_dir, download=download, architecture=architecture)
+        cfg['dataset'] = dataset
+        noisy, corrupt = label_noise(cfg['full_train'].targets, cfg['num_classes'], rate,
+                                     LABEL_NOISE_SEED)
+        cfg['full_train'].targets = noisy
+        cfg['corrupt_indices'] = corrupt
         return cfg
     default_architecture = 'lenet' if dataset == 'mnist' else 'resnet18'
     architecture = architecture or default_architecture

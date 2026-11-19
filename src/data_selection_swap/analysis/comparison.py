@@ -94,6 +94,7 @@ N_TRAIN = {
     'imagenet': 1281167,
     'cifar10_lt': 13996,     # common.LONG_TAIL_RATIO = 50
     'cifar100_lt': 12608,
+    'cifar10_noisy20': 50000,
 }
 
 # Method label for the fresh random draws that estimate E_U[D]. They carry a D
