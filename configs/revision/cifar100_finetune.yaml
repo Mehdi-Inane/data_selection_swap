@@ -141,7 +141,7 @@ stages:
     grid:
       dataset: [cifar100_in1k]
       architecture: [resnet18_in1k]
-      method: [random, random_stratified, graphcut]
+      method: [random, random_stratified, graphcut, herding]
       fraction: [0.01, 0.02, 0.05, 0.1]
       seed: [42]
     choices:
@@ -154,6 +154,11 @@ stages:
           script: scripts/select/submodular.py
           # Embed with the epoch-1 checkpoint, the one the swap selectors use.
           args: {function: graphcut, kernel: features,
+                 embedding_checkpoint: "{reference_dir}/checkpoint_001.pth"}
+        herding:
+          script: scripts/select/herding.py
+          # Per-class feature-mean matching, on the same epoch-1 embedding.
+          args: {kernel: features,
                  embedding_checkpoint: "{reference_dir}/checkpoint_001.pth"}
     args:
       checkpoint_dir: "{reference_dir}"
