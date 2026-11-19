@@ -1,10 +1,12 @@
-# Fine-tuning an ImageNet-pretrained ResNet-18 on small subsets of CIFAR-100.
-# The swap matches gradients at the pretrained starting point, and a short
-# fine-tune stays close to it, so the match should hold over the whole run
-# (from scratch it was gone by epoch 150).
+# Fine-tuning an ImageNet-pretrained ResNet-18 on small subsets of CIFAR-100:
+# fine-tune the pretrained model on the full pool, select with its epoch-1
+# checkpoint, then fine-tune the pretrained model on each subset for a few
+# epochs. A short fine-tune stays close to where the gradients were matched,
+# so the match should hold over the whole run (from scratch it was gone by
+# epoch 150).
 # Trains its own seed-42 reference: run the reference stage first. Every
-# retrain starts from that reference's starting point (checkpoint_000.pth),
-# which only exists once the reference stage has begun.
+# subset fine-tune starts from the pretrained model as the reference saved it
+# (checkpoint_000.pth), which only exists once the reference stage has begun.
 schema_version: 1
 name: cifar100_finetune
 description: >
@@ -12,12 +14,12 @@ description: >
   with torchvision's ImageNet-1k ResNet-18 and a new 100-class head, at 1%,
   2%, 5% and 10% of the pool (5 to 50 images per class), seed 42.
   Reference: full-data fine-tune, 10 epochs, SGD, lr 0.01 cosine, batch
-  128, with the starting weights saved as epoch 0. Random, stratified random
-  and GraphCut (pretrained features) against Algorithm 1 and the second-order
-  swap (k = 16, cached count sketch p = 1024), plain and class-balanced, at
-  the starting point, and the second-order swap over 4 checkpoints of the
-  fine-tune. Each subset is fine-tuned from the reference's starting point
-  for the reference's 3,910 steps at its learning rate per step.
+  128, with the starting weights saved as epoch 0. Every selector reads the
+  reference's epoch-1 checkpoint: Random, stratified random and GraphCut
+  against Algorithm 1 and the second-order swap (k = 16, cached count sketch
+  p = 1024), plain and class-balanced. Each subset is fine-tuned from the
+  pretrained model for 10 epochs over the subset (SGD, lr 0.01 cosine,
+  batch 128).
 status: ready
 
 constants:
@@ -41,8 +43,8 @@ stages:
       download: true
 
   single_swap:
-    # Algorithm 1 on exact full-network gradients at the starting point. The
-    # most expensive stage (each sweep passes over the pool at 224 px).
+    # Algorithm 1 on exact full-network gradients. The most expensive stage
+    # (each sweep passes over the pool at 224 px).
     script: scripts/select/kl_full.py
     grid:
       dataset: [cifar100_in1k]
@@ -55,11 +57,10 @@ stages:
       refresh_every: 0
       max_iters: 200
       proj_dim: 0
-      checkpoint_epochs: [0]
+      checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
       init_ckpt: "{reference_dir}/checkpoint_000.pth"
-      retrain_schedule: steps
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -73,7 +74,6 @@ stages:
       download: true
 
   second_order:
-    # At the starting point only (K = 1).
     script: scripts/select/kl_full.py
     grid:
       shortlist_k: [16]
@@ -87,11 +87,10 @@ stages:
       max_iters: 1500
       proj_dim: 1024
       per_sample_batch_size: 64
-      checkpoint_epochs: [0]
+      checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
       init_ckpt: "{reference_dir}/checkpoint_000.pth"
-      retrain_schedule: steps
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -123,45 +122,10 @@ stages:
       max_iters: 1500
       proj_dim: 1024
       per_sample_batch_size: 64
-      checkpoint_epochs: [0]
+      checkpoint_epochs: [1]
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
       init_ckpt: "{reference_dir}/checkpoint_000.pth"
-      retrain_schedule: steps
-      checkpoint_weighting: point
-      optimizer: sgd
-      metric: auto
-      scoring_transform: test
-      proj_seed: 0
-      score_batch_size: 128
-      retrain_optimizer: sgd
-      lr: 0.01
-      batch_size: 128
-      num_workers: 4
-      download: true
-
-  second_order_trajectory:
-    # Over the fine-tune: epochs 0, 3, 7 and 10, the 4 checkpoints spread
-    # evenly in steps, weighted by their learning rate. Same method name as
-    # second_order; its files carry _K4_ instead of _K1_.
-    script: scripts/select/kl_full.py
-    grid:
-      shortlist_k: [16]
-      dataset: [cifar100_in1k]
-      architecture: [resnet18_in1k]
-      fraction: [0.01, 0.02, 0.05, 0.1]
-      seed: [42]
-    args:
-      swap_rule: second_order
-      accept_tol: 1.0e-12
-      max_iters: 1500
-      proj_dim: 1024
-      per_sample_batch_size: 64
-      checkpoint_epochs: [0, 3, 7, 10]
-      checkpoint_dir: "{reference_dir}"
-      data_dir: "{data_dir}"
-      init_ckpt: "{reference_dir}/checkpoint_000.pth"
-      retrain_schedule: steps
       checkpoint_weighting: point
       optimizer: sgd
       metric: auto
@@ -189,14 +153,13 @@ stages:
           args: {stratified: true}
         graphcut:
           script: scripts/select/submodular.py
-          # Pretrained features: the starting point the swap selectors use.
+          # Embed with the epoch-1 checkpoint, the one the swap selectors use.
           args: {function: graphcut, kernel: features,
-                 embedding_checkpoint: "{reference_dir}/checkpoint_000.pth"}
+                 embedding_checkpoint: "{reference_dir}/checkpoint_001.pth"}
     args:
       checkpoint_dir: "{reference_dir}"
       data_dir: "{data_dir}"
       init_ckpt: "{reference_dir}/checkpoint_000.pth"
-      retrain_schedule: steps
       scoring_transform: test
       retrain_optimizer: sgd
       lr: 0.01

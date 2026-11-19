@@ -78,8 +78,8 @@ class ConfigSchemaTest(unittest.TestCase):
                                                  "baselines": 16},
             "revision/cifar100_finetune": {"reference": 1, "single_swap": 4,
                                            "second_order": 4,
-                                           "second_order_class_balanced": 4,
-                                           "second_order_trajectory": 4, "baselines": 12},
+                                           "second_order_class_balanced": 4, "baselines": 12},
+            "revision/cifar100_linear_probe": {"probe": 15},
         }
         for name, stages in expected.items():
             loaded = config(name)

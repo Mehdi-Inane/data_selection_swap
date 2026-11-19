@@ -994,15 +994,7 @@ def base_argparser(description: str):
                         "for every method in a comparison.")
     p.add_argument('--selection_only', action='store_true', default=False,
                    help='Stop after saving indices + timing (skip retraining).')
-    add_retrain_schedule_argument(p)
     return p
-
-
-def add_retrain_schedule_argument(p):
-    p.add_argument('--retrain_schedule', default='epochs', choices=['epochs', 'steps'],
-                   help="'epochs': the dataset's num_epochs passes over the subset. "
-                        "'steps': as many steps as the full-data reference, at its "
-                        "learning rate per step (for fine-tuning on small subsets).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1012,10 +1004,6 @@ def add_retrain_schedule_argument(p):
 # so that accuracy differences trace back to `selected_indices` alone.
 # ─────────────────────────────────────────────────────────────────────────────
 def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, paths):
-    schedule = getattr(args, 'retrain_schedule', 'epochs')
-    if schedule == 'steps':
-        return _retrain_for_reference_steps(cfg, trainset, selected_indices, device, args,
-                                            logger, paths)
     train_generator = torch.Generator().manual_seed(int(args.seed) + 10_000)
     trainloader = DataLoader(
         Subset(trainset, selected_indices),
@@ -1069,89 +1057,6 @@ def retrain_on_subset(cfg, trainset, selected_indices, device, args, logger, pat
             logger.info(f"Epoch {epoch:03d}/{cfg['num_epochs']} | "
                         f"Test Acc: {acc:.2f}% | "
                         f"Train Loss: {running_loss / len(trainloader):.4f}")
-
-    torch.save(model.state_dict(), paths['model'])
-    with open(paths['metrics'], 'w') as fh:
-        json.dump(accuracy_history, fh, indent=4)
-    logger.info(f"Saved all artefacts to {paths['base_dir']}")
-    return accuracy_history
-
-
-def reference_step_schedule(n_pool: int, batch_size: int, num_epochs: int):
-    """(steps per full-data epoch, total steps) of the reference trainer."""
-    steps_per_epoch = math.ceil(n_pool / batch_size)
-    return steps_per_epoch, num_epochs * steps_per_epoch
-
-
-def _retrain_for_reference_steps(cfg, trainset, selected_indices, device, args, logger,
-                                 paths):
-    """
-    ``--retrain_schedule steps``: train on the subset for as many SGD steps
-    as the full-data reference took, with the reference's learning rate at
-    every step (its per-epoch cosine, indexed by full-data epoch).
-
-    The trajectory bound compares the same number of steps on the subset and
-    on the full data, and a small subset trained for the reference's epochs
-    would get a few dozen steps of fine-tuning. Batches are drawn as
-    consecutive reshuffles of the subset in one loader pass. Accuracy is
-    recorded at the full-data epochs ``retrain_on_subset`` would record.
-    """
-    num_epochs = cfg['num_epochs']
-    steps_per_epoch, total_steps = reference_step_schedule(
-        len(trainset), args.batch_size, num_epochs)
-    subset = Subset(trainset, selected_indices)
-    train_generator = torch.Generator().manual_seed(int(args.seed) + 10_000)
-    sampler = torch.utils.data.RandomSampler(
-        subset, num_samples=total_steps * args.batch_size, generator=train_generator)
-    trainloader = DataLoader(subset, batch_size=args.batch_size, sampler=sampler,
-                             pin_memory=True, num_workers=args.num_workers)
-    testloader = DataLoader(cfg['testset'], batch_size=args.batch_size, shuffle=False,
-                            pin_memory=True, num_workers=args.num_workers)
-
-    set_seed(args.seed)
-    model = build_model(cfg, cfg['num_classes'], device)
-    init_note = load_or_create_init(model, getattr(args, 'init_ckpt', None), logger)
-    criterion = nn.CrossEntropyLoss()
-    kind = getattr(args, 'retrain_optimizer', 'sgd')
-    optimizer = build_optimizer(model.parameters(), kind, args.lr,
-                                weight_decay=getattr(args, 'weight_decay', 5e-4),
-                                betas=(getattr(args, 'beta1', 0.9),
-                                       getattr(args, 'beta2', 0.999)),
-                                eps=getattr(args, 'adam_eps', 1e-8))
-
-    logger.info(f"Retraining on subset of size {len(selected_indices)} with {kind} "
-                f"(lr={args.lr}) for {total_steps} steps, the full-data reference's "
-                f"{num_epochs} epochs x {steps_per_epoch} steps, {init_note} ...")
-    accuracy_history = {}
-    running_loss = 0.0
-    model.train()
-    for step, (inputs, targets) in enumerate(trainloader):
-        epoch = step // steps_per_epoch + 1
-        for group in optimizer.param_groups:
-            group['lr'] = cosine_lr(args.lr, epoch, num_epochs)
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        loss = criterion(model(inputs), targets)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-
-        if (step + 1) % steps_per_epoch == 0 and (epoch % 50 == 0 or epoch == num_epochs):
-            model.eval()
-            correct = total = 0
-            with torch.no_grad():
-                for x, y in testloader:
-                    x, y = x.to(device), y.to(device)
-                    correct += model(x).argmax(1).eq(y).sum().item()
-                    total   += y.size(0)
-            acc = 100.0 * correct / total
-            accuracy_history[epoch] = acc
-            logger.info(f"Reference epoch {epoch:03d}/{num_epochs} (step {step + 1}) | "
-                        f"Test Acc: {acc:.2f}% | "
-                        f"Train Loss: {running_loss / steps_per_epoch:.4f}")
-            model.train()
-        if (step + 1) % steps_per_epoch == 0:
-            running_loss = 0.0
 
     torch.save(model.state_dict(), paths['model'])
     with open(paths['metrics'], 'w') as fh:

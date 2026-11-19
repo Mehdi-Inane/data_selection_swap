@@ -1,0 +1,34 @@
+# Linear probe on frozen ImageNet features: train only the last layer, a
+# strongly convex problem in which the subset's solution lies within
+# sqrt(G) / lam of the full-data solution, G being the gradient mismatch at
+# that solution, which is what the second-order swap minimises (exactly here).
+# Each task runs every method and seed for one budget and weight decay; the
+# features and the full-data probe are computed by the first task and cached.
+schema_version: 1
+name: cifar100_linear_probe
+description: >
+  CIFAR-100 (cifar100_in1k), frozen 512-d features of torchvision's
+  ImageNet-1k ResNet-18 at 224 px, softmax regression with weight decay lam
+  fitted to convergence by L-BFGS. Budgets 0.5%, 1%, 2%, 5% and 10%; lam
+  1e-4, 1e-3 and 1e-2. Random, stratified random, herding and GraphCut
+  against the second-order swap (k = 16) and its class-balanced version
+  (k_c = 16), both on the exact last-layer gradients at the full-data
+  solution. 10 selection seeds; probe fitting is deterministic.
+status: ready
+
+stages:
+  probe:
+    script: scripts/select/linear_probe.py
+    grid:
+      weight_decay: [1.0e-4, 1.0e-3, 1.0e-2]
+      fraction: [0.005, 0.01, 0.02, 0.05, 0.1]
+    args:
+      seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+      data_dir: "{data_root}/cifar100_data"
+      out_dir: "{results}/linear_probe/cifar100_in1k"
+      shortlist_k: 16
+      class_shortlist_k: 16
+      max_iters: 5000
+      batch_size: 256
+      num_workers: 4
+      download: true

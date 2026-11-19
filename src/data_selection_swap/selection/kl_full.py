@@ -942,8 +942,7 @@ def _retrain_only(cfg, trainset, device, args, base_dir, method, budget, K):
                        'this command': getattr(args, key, None)}
                  for key, recorded_value in arguments.items()
                  if key in ('seed', 'batch_size', 'lr', 'retrain_optimizer',
-                            'init_ckpt', 'retrain_schedule')
-                 and not _same(key, recorded_value)}
+                            'init_ckpt') and not _same(key, recorded_value)}
         if drift:
             raise RuntimeError(
                 "--retrain_only recipe differs from the interrupted run "
@@ -1057,7 +1056,6 @@ def main():
                    help="View the pool is scored through. Default 'test' (clean) so that "
                         'this and the last-layer selector score identical inputs.')
     p.add_argument('--selection_only', action='store_true', default=False)
-    common.add_retrain_schedule_argument(p)
     p.add_argument('--retrain_only', action='store_true', default=False,
                    help='Skip selection entirely and only run the retraining stage, '
                         'reusing the *_indices.pt already saved in the run directory '
@@ -1234,11 +1232,9 @@ def main():
         # of a plain Algorithm 1 run for the same reason: they postdate it, and
         # adding them would give every existing configuration a new hash, a
         # second cfg in its result cell, and an explicit failure in
-        # analysis.comparison. --retrain_schedule is left out at its default
-        # for the same reason.
+        # analysis.comparison.
         'arguments': {**{key: value for key, value in vars(args).items()
                          if key != 'retrain_only'
-                         and not (key == 'retrain_schedule' and value == 'epochs')
                          and not (key in SWAP_RULE_ARGUMENTS
                                   and args.swap_rule == 'ranked'
                                   and not args.sketch_cache)},

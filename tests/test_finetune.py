@@ -1,10 +1,7 @@
-"""The fine-tuning pieces: the 224-px ResNet-18, an epoch-0 checkpoint in the
-reference trajectory, and the step-matched retrain."""
+"""The fine-tuning pieces: the 224-px ResNet-18 and an epoch-0 checkpoint in
+the reference trajectory."""
 
-import argparse
 import json
-import logging
-import math
 import os
 import tempfile
 import unittest
@@ -52,54 +49,11 @@ class InitialCheckpointTest(unittest.TestCase):
     def test_the_starting_point_alone(self):
         self.assertEqual(self.resolve(epochs=[0]), [(0, 1)])
 
-    def test_four_spread_checkpoints_are_the_configs_epochs(self):
-        # configs/revision/cifar100_finetune.yaml lists them explicitly.
+    def test_epoch_1_is_unaffected(self):
+        self.assertEqual(self.resolve(epochs=[1]), [(1, 391)])
+
+    def test_spread_checkpoints_start_at_the_starting_point(self):
         self.assertEqual([e for e, _ in self.resolve(num_checkpoints=4)], [0, 3, 7, 10])
-
-
-class _Pool(torch.utils.data.Dataset):
-    def __init__(self, n):
-        self.x = torch.randn(n, 3, 8, 8)
-        self.targets = (torch.arange(n) % 3).tolist()
-
-    def __len__(self):
-        return len(self.targets)
-
-    def __getitem__(self, i):
-        return self.x[i], self.targets[i]
-
-
-class StepScheduleTest(unittest.TestCase):
-    def test_subset_gets_the_references_steps_and_learning_rates(self):
-        cfg = dict(num_classes=3, num_epochs=4, input_channels=3, small_images=True,
-                   architecture='convnet', testset=_Pool(6))
-        trainset = torch.utils.data.Subset(_Pool(50), list(range(50)))
-        args = argparse.Namespace(seed=0, batch_size=8, num_workers=0, lr=0.1,
-                                  retrain_schedule='steps', retrain_optimizer='sgd')
-        lrs = []
-        build = common.build_optimizer
-
-        def recording_optimizer(*a, **k):
-            optimizer = build(*a, **k)
-            step = optimizer.step
-            optimizer.step = lambda: (lrs.append(optimizer.param_groups[0]['lr']), step())
-            return optimizer
-
-        common.build_optimizer = recording_optimizer
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                paths = dict(base_dir=tmp, model=os.path.join(tmp, 'm.pth'),
-                             metrics=os.path.join(tmp, 'metrics.json'))
-                history = common.retrain_on_subset(cfg, trainset, [0, 1, 2, 3, 4], 'cpu',
-                                                   args, logging.getLogger(__name__), paths)
-        finally:
-            common.build_optimizer = build
-
-        steps_per_epoch = math.ceil(50 / 8)
-        self.assertEqual(len(lrs), 4 * steps_per_epoch)
-        self.assertEqual(lrs, [common.cosine_lr(0.1, s // steps_per_epoch + 1, 4)
-                               for s in range(len(lrs))])
-        self.assertEqual(list(history), [4])
 
 
 if __name__ == '__main__':
