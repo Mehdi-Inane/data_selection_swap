@@ -28,7 +28,7 @@ which is the single-iterate discrepancy of Remark 4.3 in the manuscript. Every g
 
 - the test accuracy of $\mathcal{A}(S_I)$;
 - its *agreement* with $\mathcal{A}(S)$, the fraction of test images on which the two models predict the same class, regardless of correctness;
-- the discrepancies $G_{W_0}(I)$ and $G_{W_1}(I)$.
+- the discrepancies $G_{W_0}(I)$ and $G_{W_1}(I)$, and, for evaluation only, $G_{W^\star}(I)$.
 
 Agreement measures faithfulness to full-data training directly. Table 1 gives the reference accuracies.
 
@@ -69,7 +69,7 @@ As in Theorem 4.6(i), every accepted exchange strictly decreases $G_W$, so the s
 
 ## 3 Results
 
-Tables 2 and 3 report test accuracy, Table 4 agreement with the full-data model, and Table 5 the discrepancies at the two selection points.
+Tables 2 and 3 report test accuracy, Table 4 agreement with the full-data model, Table 5 the discrepancies at the two selection points, and Table 6 the correlation between the discrepancy at $W^\star$ and accuracy.
 
 **Every swap variant improves on its random starting subset.** Table 3 compares each swap with the subset it started from, paired by seed: SO-Swap with Random and CB-Swap with Stratified random. The swap wins in all 180 comparisons (4 variants × 15 cells × 3 seeds). The gain is between +3.7 and +5.9 points at 5% retention and between +1.9 and +3.1 points at 15%. The standard deviation across seeds is between 0.02 and 0.70 points (Table 2), so the improvement is several times the seed-to-seed variation. The gain decreases with the retention fraction; for CB-Swap($W_0$) at $\lambda = 10^{-3}$ it is +5.6, +4.4, +3.8, +3.3 and +3.0 points from 5% to 15%. This is the behaviour expected if the swaps remove sampling noise, since the expected discrepancy of a uniform subset decays as $\frac{n-m}{m(n-1)}$ (Theorem 4.6(ii)).
 
@@ -220,17 +220,27 @@ Table 5 is consistent with this reading:
 | CB-Swap ($W_0$) | 0.0310 | 0.0223 | 0.0135 | 0.0102 | 0.0074 |
 | CB-Swap ($W_1$) | 0.0165 | 0.0108 | 0.0069 | 0.0054 | 0.0040 |
 
+**The discrepancy at the full-data solution tracks the accuracy gap across methods.** We also evaluate every selected subset at $W^\star$, the point at which the convexity bound of Section 5 holds, and correlate $\sqrt{G_{W^\star}(I)/2}$ with the accuracy gap $\text{acc}(\mathcal{A}(S)) - \text{acc}(\mathcal{A}(S_I))$, the coordinates of Figure 1 of the manuscript. Table 6 reports the Pearson correlation over the 20 subsets of each cell. It lies between +0.84 and +0.95, with median +0.90, and it does not rely on the Random subsets: without them, the median is +0.92 (range +0.77 to +0.98). Over the eight method means of each cell, the median is +0.92 (range +0.79 to +0.97). The discrepancy at $W_1$ correlates as strongly (median +0.90, range +0.85 to +0.94), and the one at $W_0$ less (median +0.53, range +0.48 to +0.60). $G_{W_0}$ measures only the class-mean component of the gradient, so it does not register the improvement that SO-Swap($W_1$) makes in the component that depends on the predictions (Table 5(a)). No method selects with $W^\star$; it is used here only to evaluate the subsets.
+
+**Table 6:** Pearson correlation between $\sqrt{G_{W^\star}(I)/2}$ and the accuracy gap to the full-data probe (points), over the 20 subsets of each cell: Random, Stratified random, SO-Swap and CB-Swap at both selection points (three seeds each), and GraphCut at both selection points (one subset each).
+
+| $\lambda$ | 5% | 7% | 10% | 12% | 15% |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| $10^{-4}$ | +0.84 | +0.88 | +0.92 | +0.92 | +0.89 |
+| $10^{-3}$ | +0.87 | +0.91 | +0.94 | +0.93 | +0.95 |
+| $10^{-2}$ | +0.87 | +0.87 | +0.90 | +0.90 | +0.91 |
+
 **Class balance alone does not explain the gains.** Stratified random is only 0.0–0.8 points more accurate than Random (Table 2), while CB-Swap adds a further 2.7–5.9 points on top of Stratified random (Table 3).
 
 **GraphCut does not exploit the discrepancy.** GraphCut($W_0$) is less accurate than Random in all 15 cells. GraphCut($W_1$) is more accurate than Random in 10 of the 15 cells: every retention fraction at $\lambda = 10^{-4}$, all but 15% at $\lambda = 10^{-3}$, and only 5% at $\lambda = 10^{-2}$. Its $G_{W_1}$ is larger than that of Stratified random in every cell. GraphCut favours central, non-redundant examples, which is not the same as matching the subset's mean gradient to that of the pool.
 
 ## 4 Computational cost
 
-**Wall-time.** Table 6 reports the selection time of each run: the swap search, or GraphCut's greedy maximisation. It excludes the steps shared by all methods: feature extraction (about two minutes per instance), the computation of the residuals at the selection point, the fit of $W^\star$ and the one SGD epoch for $W_1$, each of which takes seconds.
+**Wall-time.** Table 7 reports the selection time of each run: the swap search, or GraphCut's greedy maximisation. It excludes the steps shared by all methods: feature extraction (about two minutes per instance), the computation of the residuals at the selection point, the fit of $W^\star$ and the one SGD epoch for $W_1$, each of which takes seconds.
 
 SO-Swap takes 2.8–5.6 s at $W_0$ and 5.0–12.1 s at $W_1$. Each step costs one product between the pool and the current aggregate, plus one $16 \times 16$ block. CB-Swap takes 5.7–10.8 min at $W_0$ and 4.7–8.9 min at $W_1$, which is 45–120 times slower. The difference comes from our implementation, which loops over the 100 classes in Python at every step and scores a separate $16 \times 16$ block per class. The step cost is therefore dominated by per-class overhead, not arithmetic. Times were measured while three tasks shared a 4-vCPU instance, which explains part of their spread.
 
-**Table 6:** Selection wall-time per run, in the unit given with each method: mean over nine runs (three weight decays × three seeds), with the range in parentheses. GraphCut is over three runs.
+**Table 7:** Selection wall-time per run, in the unit given with each method: mean over nine runs (three weight decays × three seeds), with the range in parentheses. GraphCut is over three runs.
 
 | Method, unit | 5% | 7% | 10% | 12% | 15% |
 |:---|:---:|:---:|:---:|:---:|:---:|
@@ -241,9 +251,9 @@ SO-Swap takes 2.8–5.6 s at $W_0$ and 5.0–12.1 s at $W_1$. Each step costs on
 | GraphCut ($W_0$), s | 13.3 (13.0–13.7) | 14.8 (14.2–15.8) | 15.6 (14.8–16.9) | 15.5 (13.8–17.4) | 16.1 (15.3–17.2) |
 | GraphCut ($W_1$), s | 10.2 (9.9–10.5) | 10.2 (9.3–10.8) | 11.6 (10.4–12.3) | 13.7 (12.6–14.5) | 14.6 (13.7–15.2) |
 
-**Number of swaps.** Table 7 reports the number of accepted exchanges. All 180 swap runs stopped because no shortlisted exchange decreased $G_W$ any further; none reached the cap of 5,000. The number of exchanges grows with $m$ but more slowly than $m$, between 0.11 and 0.52 exchanges per selected example. CB-Swap performs 3.0–3.3 times as many exchanges as SO-Swap at $W_0$, and 1.3–1.5 times as many at $W_1$: searching every class at each step keeps it finding improving exchanges for longer. At $W_1$, SO-Swap performs fewer exchanges for larger $\lambda$; at 15% it makes 1,892, 1,857 and 1,596 exchanges for $\lambda = 10^{-4}$, $10^{-3}$ and $10^{-2}$. Since an example can leave and later re-enter the subset, these counts are not the number of examples replaced. We did not record that number.
+**Number of swaps.** Table 8 reports the number of accepted exchanges. All 180 swap runs stopped because no shortlisted exchange decreased $G_W$ any further; none reached the cap of 5,000. The number of exchanges grows with $m$ but more slowly than $m$, between 0.11 and 0.52 exchanges per selected example. CB-Swap performs 3.0–3.3 times as many exchanges as SO-Swap at $W_0$, and 1.3–1.5 times as many at $W_1$: searching every class at each step keeps it finding improving exchanges for longer. At $W_1$, SO-Swap performs fewer exchanges for larger $\lambda$; at 15% it makes 1,892, 1,857 and 1,596 exchanges for $\lambda = 10^{-4}$, $10^{-3}$ and $10^{-2}$. Since an example can leave and later re-enter the subset, these counts are not the number of examples replaced. We did not record that number.
 
-**Table 7:** Accepted exchanges per run: mean over nine runs, with the range in parentheses.
+**Table 8:** Accepted exchanges per run: mean over nine runs, with the range in parentheses.
 
 | Method | 5% | 7% | 10% | 12% | 15% |
 |:---|:---:|:---:|:---:|:---:|:---:|
@@ -260,7 +270,7 @@ On a linear probe over frozen features, minimizing the gradient discrepancy at a
 - *the per-class budget is small* (25–75 images), so the sampling noise of a random subset is large;
 - *the component of the gradient determined by the class proportions and class-mean features is independent of $W$*, so matching it at $W_0$ controls the gradient at every point the fit visits.
 
-We do not read these results as evidence that the swaps are the best selectors in general. The setting is a convex problem on fixed features. Our convexity bound, $\|\mathcal{A}(S_I) - W^\star\| \le \sqrt{G_{W^\star}(I)}/\lambda$, holds only for the discrepancy at $W^\star$, so the gains reported here at $W_0$ and $W_1$ are empirical rather than guaranteed. The results also come from a single dataset and backbone, with three seeds per configuration. The paired gains are consistent across all 180 comparisons, but each standard deviation is estimated from three runs. Finally, the wall-times of CB-Swap reflect a per-class loop in our implementation rather than the cost of the method itself, and were measured under CPU contention.
+We do not read these results as evidence that the swaps are the best selectors in general. The setting is a convex problem on fixed features. Our convexity bound, $\|\mathcal{A}(S_I) - W^\star\| \le \sqrt{G_{W^\star}(I)}/\lambda$, holds only for the discrepancy at $W^\star$, so the gains reported here at $W_0$ and $W_1$ are empirical rather than guaranteed. Across methods, the discrepancy at $W^\star$ is strongly correlated with the accuracy gap (Table 6), but this relation is also empirical: the bound concerns the distance in parameter space, not accuracy. The results also come from a single dataset and backbone, with three seeds per configuration. The paired gains are consistent across all 180 comparisons, but each standard deviation is estimated from three runs. Finally, the wall-times of CB-Swap reflect a per-class loop in our implementation rather than the cost of the method itself, and were measured under CPU contention.
 
 **Implementation details.** The probe and both swaps are implemented in `src/data_selection_swap/selection/linear_probe.py`, which reuses the swap rule of `selection/second_order.py`. A single cell is run with
 
