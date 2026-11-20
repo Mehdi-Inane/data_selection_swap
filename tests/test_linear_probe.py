@@ -7,7 +7,8 @@ import torch
 from data_selection_swap import subsets
 from data_selection_swap.selection.kl_full import CachedTrajectory
 from data_selection_swap.selection.linear_probe import (
-    ProbeGradients, fit_probe, residuals, two_point_residuals)
+    ProbeGradients, class_kernels, fit_probe, graphcut, herding, residuals, sgd_epoch,
+    two_point_residuals)
 from data_selection_swap.selection.second_order import second_order_swap
 
 
@@ -67,6 +68,44 @@ class TwoPointTest(unittest.TestCase):
         both = ProbeGradients(two_point_residuals(Phi, Y, W_star), Phi)
         both.set_subset(index)
         self.assertAlmostEqual(both.D(10), sum(parts), places=12)
+
+
+class SelectionPointTest(unittest.TestCase):
+    """Herding and GraphCut on the gradient kernel at W = 0 are the feature versions."""
+
+    def setUp(self):
+        self.Phi, self.Y = problem(n=80)
+        self.class_idx = [torch.where(self.Y == c)[0] for c in range(4)]
+        self.quota = torch.tensor([3, 4, 2, 5])
+        R0 = residuals(self.Phi, self.Y, torch.zeros(4, self.Phi.shape[1], dtype=torch.float64))
+        self.at_zero = class_kernels(R0, self.Phi, self.class_idx)
+        self.features = [self.Phi[i] @ self.Phi[i].T for i in self.class_idx]
+
+    def test_kernel_herding_is_feature_herding(self):
+        explicit = []
+        for idx, take in zip(self.class_idx, self.quota.tolist()):
+            X, total, free = self.Phi[idx], torch.zeros(self.Phi.shape[1], dtype=torch.float64), \
+                torch.ones(len(idx), dtype=torch.bool)
+            for t in range(1, take + 1):
+                gap = ((X.mean(0) - (total + X) / t) ** 2).sum(1).masked_fill(~free, float('inf'))
+                j = int(gap.argmin())
+                free[j] = False
+                total += X[j]
+                explicit.append(int(idx[j]))
+        torch.testing.assert_close(herding(self.features, self.class_idx, self.quota),
+                                   torch.tensor(sorted(explicit)))
+        torch.testing.assert_close(herding(self.at_zero, self.class_idx, self.quota),
+                                   torch.tensor(sorted(explicit)))
+
+    def test_graphcut_at_zero_is_feature_graphcut(self):
+        torch.testing.assert_close(graphcut(self.at_zero, self.class_idx, self.quota),
+                                   graphcut(self.features, self.class_idx, self.quota))
+
+    def test_one_sgd_epoch_moves_between_zero_and_the_solution(self):
+        W_star, _ = fit_probe(self.Phi, self.Y, 4, 0.05)
+        W_1 = sgd_epoch(self.Phi, self.Y, 4, 0.05, batch_size=8)
+        self.assertGreater(float(W_1.norm()), 0.0)
+        self.assertLess(float((W_1 - W_star).norm()), float(W_star.norm()))
 
 
 class ConvexBoundTest(unittest.TestCase):

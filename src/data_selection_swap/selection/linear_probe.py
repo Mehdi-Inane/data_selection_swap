@@ -16,6 +16,11 @@ r_i = softmax - onehot and phi_i = [features, 1], so every swap quantity
 factors through r and phi (``ProbeGradients``) and the 51k-d gradients are
 never stored.
 
+Methods are named by the point whose gradients they use (``SELECTORS``):
+W = 0, W_1 (one SGD epoch from W = 0) or W*. Herding and GraphCut use the
+per-class gradient kernel at their point; at W = 0 that is the feature kernel
+up to a constant, so there they are the usual feature-based methods.
+
 One run is one budget: every method and seed. Each probe is fitted to
 convergence by full-batch L-BFGS from W = 0, which is deterministic, so the
 only randomness is the subset. Features and W* are cached in --out_dir.
@@ -35,9 +40,28 @@ from .. import common, subsets
 from .second_order import second_order_swap
 
 DATASET, ARCHITECTURE = 'cifar100_in1k', 'resnet18_in1k'
-METHODS = ('random', 'random_stratified', 'herding', 'graphcut',
-           'second_order', 'second_order_class_balanced',
-           'herding_then_swap', 'swap_two_point')
+# method -> (selector, point whose gradients it uses). Points: w0 (W = 0),
+# w1 (one SGD epoch from W = 0, ``sgd_epoch``) and wstar (the full-data
+# solution). At W = 0 every image of a class has the same residual, so the
+# gradient kernel is a constant times the feature kernel: herding_w0 and
+# graphcut_w0 are the feature-based Herding and GraphCut. 'herding' and
+# 'graphcut' are the names configs/revision/cifar100_linear_probe.yaml uses.
+SELECTORS = {
+    'random': ('random', None),
+    'random_stratified': ('stratified', None),
+    'herding': ('herding', 'w0'),
+    'graphcut': ('graphcut', 'w0'),
+    'second_order': ('swap', 'wstar'),
+    'second_order_class_balanced': ('swap_cb', 'wstar'),
+    'herding_then_swap': ('herding_swap', 'wstar'),     # swap at W* from Herding's subset
+    'swap_two_point': ('swap_cb', 'two_point'),         # G(W = 0) + G(W*)
+}
+for _point in ('w0', 'w1'):
+    SELECTORS.update({f'herding_{_point}': ('herding', _point),
+                      f'graphcut_{_point}': ('graphcut', _point),
+                      f'second_order_{_point}': ('swap', _point),
+                      f'class_balanced_{_point}': ('swap_cb', _point)})
+METHODS = tuple(SELECTORS)
 
 logger = logging.getLogger(__name__)
 
@@ -138,31 +162,53 @@ def two_point_residuals(Phi, Y, W_star):
     return torch.cat(blocks, dim=1)
 
 
-def herding(features, Y, quota):
-    """Per class, greedily keep the running mean of the chosen features
-    closest to the class mean (Welling 2009)."""
+def sgd_epoch(Phi, Y, num_classes, lam, lr=0.01, batch_size=128, seed=0):
+    """W_1: one epoch of SGD (Nesterov momentum 0.9, as everywhere in the repo)
+    from W = 0 on mean CE + lam/2 ||W||^2, with a seeded shuffle."""
+    W = torch.zeros(num_classes, Phi.shape[1], dtype=Phi.dtype, device=Phi.device,
+                    requires_grad=True)
+    optimizer = common.build_optimizer([W], 'sgd', lr, weight_decay=lam)
+    order = torch.randperm(len(Y), generator=torch.Generator().manual_seed(seed))
+    for start in range(0, len(Y), batch_size):
+        batch = order[start:start + batch_size].to(Phi.device)
+        optimizer.zero_grad()
+        F.cross_entropy(Phi[batch] @ W.T, Y[batch]).backward()
+        optimizer.step()
+    return W.detach()
+
+
+def class_kernels(R, Phi, class_idx):
+    """Per-class gradient kernels <g_i, g_j> = <r_i, r_j> <phi_i, phi_j>."""
+    return [(R[idx] @ R[idx].T) * (Phi[idx] @ Phi[idx].T) for idx in class_idx]
+
+
+def herding(kernels, class_idx, quota):
+    """
+    Kernel herding per class (Welling 2009): greedily keep the mean of the
+    chosen embeddings closest to the class mean. With S the chosen sum after
+    t - 1 picks, j minimises ||mu - (S + x_j)/t||^2, i.e.
+    -2 t <mu, x_j> + 2 <S, x_j> + ||x_j||^2.
+    """
     chosen = []
-    for c, take in enumerate(quota.tolist()):
-        members = torch.where(Y == c)[0]
-        X = features[members]
-        mean, total = X.mean(0), torch.zeros_like(X[0])
-        free = torch.ones(len(members), dtype=torch.bool, device=X.device)
+    for K, members, take in zip(kernels, class_idx, quota.tolist()):
+        mean_sim, picked_sim = K.mean(0), torch.zeros_like(K[0])
+        free = torch.ones(len(members), dtype=torch.bool, device=K.device)
         for t in range(1, take + 1):
-            gap = ((mean - (total + X) / t) ** 2).sum(1).masked_fill(~free, float('inf'))
-            j = int(gap.argmin())
+            score = (-2 * t * mean_sim + 2 * picked_sim + K.diagonal()).masked_fill(
+                ~free, float('inf'))
+            j = int(score.argmin())
             free[j] = False
-            total += X[j]
+            picked_sim += K[j]
             chosen.append(int(members[j]))
     return torch.tensor(sorted(chosen))
 
 
-def graphcut(features, Y, quota, num_classes):
-    """GraphCut on per-class feature kernels, as scripts/select/submodular.py."""
+def graphcut(kernels, class_idx, quota):
+    """GraphCut on per-class kernels, as scripts/select/submodular.py."""
     from .submodular import submodular_select
-    features, Y = features.cpu(), Y.cpu()
-    class_idx = [torch.where(Y == c)[0] for c in range(num_classes)]
-    kernels = [features[idx] @ features[idx].T for idx in class_idx]
-    return submodular_select('graphcut', kernels, class_idx, quota, 1.0, 'lazy', 0).sort().values
+    return submodular_select('graphcut', [K.cpu() for K in kernels],
+                             [idx.cpu() for idx in class_idx], quota, 1.0, 'lazy',
+                             0).sort().values
 
 
 def _cached(path, build):
@@ -195,7 +241,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--data_dir', required=True)
     p.add_argument('--out_dir', required=True,
-                   help='Features, W*, results and indices are written here.')
+                   help='Features, W*, W_1, results and indices are written here.')
     p.add_argument('--fraction', required=True, type=float)
     p.add_argument('--seeds', default=[0], type=int, nargs='+')
     p.add_argument('--methods', default=list(METHODS), nargs='+', choices=METHODS)
@@ -219,6 +265,7 @@ def main():
     Phi, Phi_test = ones(data['train_phi']), ones(data['test_phi'])
     Y, Y_test = data['train_y'].to(device), data['test_y'].to(device)
     n, m = len(Y), int(args.fraction * len(Y))
+    accuracy = lambda W: 100.0 * float(((Phi_test @ W.T).argmax(1) == Y_test).float().mean())
 
     def build_full():
         W, grad_norm = fit_probe(Phi, Y, C, lam)
@@ -226,62 +273,70 @@ def main():
     full = _cached(os.path.join(args.out_dir, f'full_probe_wd{lam:g}.pt'), build_full)
     W_star = full['W'].to(device)
     full_pred = (Phi_test @ W_star.T).argmax(1)
-    full_acc = 100.0 * float((full_pred == Y_test).float().mean())
-    logger.info(f"Full-data probe (lam={lam:g}): test acc {full_acc:.2f}%, "
-                f"gradient norm {full['grad_norm']:.2e}; budget m={m} of n={n}")
+    full_acc = accuracy(W_star)
+    W_1 = _cached(os.path.join(args.out_dir, f'w1_wd{lam:g}.pt'),
+                  lambda: dict(W=sgd_epoch(Phi, Y, C, lam).cpu()))['W'].to(device)
+    logger.info(f"Full-data probe (lam={lam:g}): test acc {full_acc:.2f}%, gradient norm "
+                f"{full['grad_norm']:.2e}; W_1 (one SGD epoch) test acc {accuracy(W_1):.2f}%; "
+                f"budget m={m} of n={n}")
 
-    grads = ProbeGradients(residuals(Phi, Y, W_star), Phi)
-    at_zero = ProbeGradients(residuals(Phi, Y, torch.zeros_like(W_star)), Phi)
-    two_point = None                                # built if swap_two_point runs
+    weights = {'w0': torch.zeros_like(W_star), 'w1': W_1, 'wstar': W_star}
+    grads = {point: ProbeGradients(residuals(Phi, Y, W), Phi) for point, W in weights.items()}
     quota = common.per_class_budget(Y.cpu(), C, m)
-    features = data['train_phi'].to(device)
-    herded = None
-    # The same subset for every seed.
-    deterministic = {'herding', 'graphcut', 'herding_then_swap'}
+    class_idx = [torch.where(Y == c)[0] for c in range(C)]
+    kernels = {}            # per point, built on first use
+
+    def class_kernels_at(point):
+        if point not in kernels:
+            kernels[point] = class_kernels(grads[point].R, Phi, class_idx)
+        return kernels[point]
     index_dir = os.path.join(args.out_dir, 'indices')
     os.makedirs(index_dir, exist_ok=True)
 
     rows = []
     for method in args.methods:
-        for seed in ([None] if method in deterministic else args.seeds):
+        kind, point = SELECTORS[method]
+        deterministic = kind in ('herding', 'graphcut', 'herding_swap')
+        for seed in ([None] if deterministic else args.seeds):
             t0 = time.perf_counter()
             extra = {}
-            if method == 'random':
+            if kind == 'random':
                 index = subsets.initial_subset(n, m, seed=seed)
-            elif method == 'random_stratified':
+            elif kind == 'stratified':
                 index = subsets.initial_subset(n, m, seed=seed, labels=Y.cpu(), num_classes=C)
-            elif method == 'herding':
-                index = herding(features, Y, quota)
-            elif method == 'graphcut':
-                index = graphcut(features, Y, quota, C)
+            elif kind == 'herding':
+                index = herding(class_kernels_at(point), class_idx, quota)
+            elif kind == 'graphcut':
+                index = graphcut(class_kernels_at(point), class_idx, quota)
             else:
-                # Class-balanced except plain second_order. herding_then_swap
-                # starts from Herding's subset (it meets the quotas);
-                # swap_two_point minimises G(W=0) + G(W*).
-                if method == 'herding_then_swap' and herded is None:
-                    herded = herding(features, Y, quota)
-                if method == 'swap_two_point' and two_point is None:
-                    two_point = ProbeGradients(two_point_residuals(Phi, Y, W_star), Phi)
+                # swap: plain; swap_cb and herding_swap: class-balanced.
+                if point == 'two_point':
+                    if 'two_point' not in grads:
+                        grads['two_point'] = ProbeGradients(
+                            two_point_residuals(Phi, Y, W_star), Phi)
+                start = (herding(class_kernels_at('w0'), class_idx, quota)
+                         if kind == 'herding_swap' else None)
                 index, _, diag = second_order_swap(
-                    two_point if method == 'swap_two_point' else grads, m,
-                    k=args.shortlist_k, max_iters=args.max_iters,
-                    labels=None if method == 'second_order' else Y, num_classes=C,
-                    class_k=args.class_shortlist_k, seed=seed,
-                    init_index=herded if method == 'herding_then_swap' else None)
+                    grads[point], m, k=args.shortlist_k, max_iters=args.max_iters,
+                    labels=None if kind == 'swap' else Y, num_classes=C,
+                    class_k=args.class_shortlist_k, seed=seed, init_index=start)
                 extra = {key: diag[key] for key in ('swaps', 'reason', 'one_swap_local_optimum')}
             selection_sec = time.perf_counter() - t0
 
             index = index.to(device)
             W, grad_norm = fit_probe(Phi[index], Y[index], C, lam)
             pred = (Phi_test @ W.T).argmax(1)
-            grads.set_subset(index)
-            at_zero.set_subset(index)
-            G = grads.D(m)
+            G = {}
+            for name in ('w0', 'w1', 'wstar'):
+                grads[name].set_subset(index)
+                G[name] = grads[name].D(m)
             row = dict(method=method, seed=seed, fraction=args.fraction, budget=m,
+                       selection_point=point,
                        test_acc=100.0 * float((pred == Y_test).float().mean()),
                        agreement=100.0 * float((pred == full_pred).float().mean()),
                        dist_to_full=float((W - W_star).norm()),
-                       G=G, bound=G ** 0.5 / lam, G_at_zero=at_zero.D(m),
+                       G=G['wstar'], bound=G['wstar'] ** 0.5 / lam,
+                       G_at_zero=G['w0'], G_at_w1=G['w1'],
                        classes_covered=int(Y[index].unique().numel()),
                        selection_sec=selection_sec, fit_grad_norm=grad_norm, **extra)
             rows.append(row)
@@ -289,7 +344,7 @@ def main():
                 index_dir, f"{method}_f{args.fraction:g}_seed{seed}.pt"))
             logger.info(f"{method:28s} seed={seed}  acc={row['test_acc']:.2f}%  "
                         f"agree={row['agreement']:.2f}%  |W-W*|={row['dist_to_full']:.3f}  "
-                        f"G={G:.3e}  ({selection_sec:.1f}s)")
+                        f"G(0)={G['w0']:.3e}  G(W1)={G['w1']:.3e}  ({selection_sec:.1f}s)")
 
     out = os.path.join(args.out_dir, f"results_f{args.fraction:g}_wd{lam:g}.json")
     if os.path.exists(out):     # keep the rows of methods this run did not redo
@@ -297,7 +352,8 @@ def main():
             rows = [r for r in json.load(fh)['rows'] if r['method'] not in args.methods] + rows
     common.atomic_json_dump(dict(dataset=DATASET, architecture=ARCHITECTURE,
                                  weight_decay=lam, full_test_acc=full_acc,
-                                 full_grad_norm=full['grad_norm'], n=n, rows=rows), out)
+                                 full_grad_norm=full['grad_norm'],
+                                 w1_test_acc=accuracy(W_1), n=n, rows=rows), out)
     logger.info(f"Wrote {out}")
 
 

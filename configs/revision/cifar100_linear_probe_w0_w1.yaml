@@ -1,0 +1,39 @@
+# Linear probe on frozen ImageNet features, with selection from cheap points
+# only: W = 0 and W_1 (one SGD epoch from W = 0 on the full pool). Every
+# gradient-based selector at a point sees the same per-image gradients:
+# the swaps match them, Herding and GraphCut run on their per-class kernel
+# (at W = 0 that is the feature kernel, so herding_w0 and graphcut_w0 are the
+# usual feature-based methods). The full-data solution W* is used only to
+# evaluate. Each task runs every method and seed for one budget and weight
+# decay; features, W* and W_1 are computed by the first task and cached.
+schema_version: 1
+name: cifar100_linear_probe_w0_w1
+description: >
+  CIFAR-100 (cifar100_in1k), frozen 512-d features of torchvision's
+  ImageNet-1k ResNet-18 at 224 px, softmax regression with weight decay lam
+  fitted to convergence by L-BFGS from W = 0. Budgets 5%, 7%, 10%, 12% and
+  15%; lam 1e-4, 1e-3 and 1e-2; selection seeds 0, 1 and 2. At W = 0 and at
+  W_1 (one epoch of SGD, lr 0.01, batch 128, from W = 0): the second-order
+  swap (k = 16), the class-balanced swap (k_c = 16), Herding and GraphCut,
+  all on exact last-layer gradients; plus Random and stratified random.
+status: ready
+
+stages:
+  probe:
+    script: scripts/select/linear_probe.py
+    grid:
+      weight_decay: [1.0e-4, 1.0e-3, 1.0e-2]
+      fraction: [0.05, 0.07, 0.1, 0.12, 0.15]
+    args:
+      methods: [random, random_stratified,
+                herding_w0, graphcut_w0, second_order_w0, class_balanced_w0,
+                herding_w1, graphcut_w1, second_order_w1, class_balanced_w1]
+      seeds: [0, 1, 2]
+      data_dir: "{data_root}/cifar100_data"
+      out_dir: "{results}/linear_probe_w0_w1/cifar100_in1k"
+      shortlist_k: 16
+      class_shortlist_k: 16
+      max_iters: 5000
+      batch_size: 256
+      num_workers: 4
+      download: true
